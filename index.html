@@ -85,16 +85,71 @@
     .sw { width: 36px; height: 36px; }
     #palette { gap: 7px; padding: 8px; }
   }
+
+  /* ---- FXオーバーレイ（波紋リング・金魚・桜）。タッチは透過 ---- */
+  #fx { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+
+  /* ---- こどもロック: FABを隠す（親パネルは4本指1.5秒ホールドで開く） ---- */
+  body.locked .fab { display: none; }
+  body.locked #palette { display: none !important; }
+
+  /* ---- おうちのかたメニュー（🎨を2.5秒長押し / 4本指1.5秒ホールド） ---- */
+  #panel {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: none; flex-direction: column; gap: 11px;
+    padding: 18px 20px;
+    background: rgba(241, 235, 222, 0.97);
+    border-radius: 22px;
+    box-shadow: 0 6px 30px rgba(60, 50, 30, 0.35);
+    font-family: -apple-system, "Hiragino Sans", sans-serif;
+    color: #5a4f3d;
+    width: min(330px, 88vw); max-height: 86vh; overflow-y: auto;
+  }
+  #panel.open { display: flex; }
+  #panel h2 { margin: 0 0 3px; font-size: 15px; font-weight: 600; text-align: center; }
+  .prow { display: flex; align-items: center; justify-content: space-between; gap: 14px; font-size: 14px; }
+  .prow small { color: #9a8d77; font-size: 11px; }
+  .pbtn {
+    min-width: 98px; padding: 10px 12px; border-radius: 999px;
+    border: 2px solid rgba(107, 93, 73, 0.35); background: #fff;
+    font-size: 14px; color: #5a4f3d; font-family: inherit;
+  }
+  .pbtn.on { background: #6b5d49; color: #fff; border-color: #6b5d49; }
+  #panelClose {
+    margin-top: 4px; background: #6b5d49; color: #fff; border: none;
+    padding: 12px; border-radius: 999px; font-size: 15px; font-family: inherit;
+  }
+
+  /* ---- おやすみ（タイマー満了）: 夕焼けにゆっくり沈む ---- */
+  #sunset {
+    position: fixed; inset: 0; z-index: 10;
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    background: linear-gradient(180deg, #2b2640 0%, #5d3a55 48%, #c97a4a 100%);
+    opacity: 0; transition: opacity 6s ease;
+    font-family: -apple-system, "Hiragino Sans", sans-serif;
+  }
+  #sunset.on { display: flex; }
+  #sunset.visible { opacity: 1; }
+  #sunset .moon { font-size: 76px; }
+  #sunset .msg { color: rgba(255, 243, 224, 0.9); font-size: 19px; }
+  #sunset .hint { color: rgba(255, 243, 224, 0.4); font-size: 11px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<canvas id="fx"></canvas>
 <div id="palette"></div>
 <button id="palBtn" class="fab" aria-label="いろをえらぶ">🎨</button>
 <button id="washBtn" class="fab" aria-label="ながす">🌊</button>
+<div id="panel"></div>
+<div id="sunset">
+  <div class="moon" id="moon">🌙</div>
+  <div class="msg">きょうは おしまい</div>
+  <div class="hint">おとなのひと: つきを 2びょう ながおし</div>
+</div>
 <script>
 "use strict";
-console.log("SUMI build: v3.4-mobile-ui");
+console.log("SUMI build: v4.0-hanayaka");
 window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" + line); };
 
 /* ============================================================
@@ -138,30 +193,44 @@ const config = {
 
 // 墨の色は「吸収ベクトル」で持つ（紙の色 × exp(-dye) で減算混色）
 const PAPER_RGB = [0.945, 0.922, 0.871];
-const INKS = [
-  { a: [0.85, 0.83, 0.79] },  // 墨（わずかに暖かい黒）
-  { a: [0.80, 0.66, 0.40] },  // 藍
-  { a: [0.85, 0.83, 0.79] },  // 墨
-  { a: [0.26, 0.70, 0.74] },  // 朱
-  { a: [0.85, 0.83, 0.79] },  // 墨
-  { a: [0.68, 0.55, 0.64] },  // 松葉
-];
-// パレットの固定色（おまかせ=null は従来どおり INKS を順繰り）
-const PALETTE_INKS = [
-  { name: "おまかせ", a: null },
-  { name: "墨",   a: [0.85, 0.83, 0.79] },
-  { name: "藍",   a: [0.80, 0.66, 0.40] },
-  { name: "朱",   a: [0.26, 0.70, 0.74] },
-  { name: "松葉", a: [0.68, 0.55, 0.64] },
-  { name: "山吹", a: [0.12, 0.30, 0.82] },
-  { name: "菖蒲", a: [0.52, 0.76, 0.32] },
-];
-let selectedInk = null;  // null = おまかせ（自動切替）
-let inkIdx = 0;
-function nextInk(scale) {
-  const a = selectedInk || INKS[inkIdx++ % INKS.length].a;
-  return [a[0] * scale, a[1] * scale, a[2] * scale];
-}
+
+/* ---- 設定（親パネルで変更・localStorage 永続化） ----
+ * mode "vivid": 1歳児向け既定。乳児は低彩度色の知覚・選好が弱い（PMC7000485）ため、
+ *               伝統色の色相を保ったまま彩度を引き上げた版。
+ * mode "shibui": 従来の渋い伝統色（親が楽しむ用）。 */
+const settings = Object.assign(
+  { mode: "vivid", voice: false, lock: false, timerMin: 0, tilt: false },
+  (() => { try { return JSON.parse(localStorage.getItem("sumi.settings") || "{}"); } catch (e) { return {}; } })()
+);
+function saveSettings() { try { localStorage.setItem("sumi.settings", JSON.stringify(settings)); } catch (e) {} }
+
+// name は色名よみあげ（ひらがな）・timbre はタップ音色
+const INK_SETS = {
+  vivid: [
+    { name: "あか",     a: [0.06, 1.05, 1.00], timbre: "taiko"   },  // 朱 → ビビッド朱赤
+    { name: "あお",     a: [1.05, 0.50, 0.06], timbre: "chime"   },  // 藍 → コバルト
+    { name: "きいろ",   a: [0.03, 0.14, 1.10], timbre: "marimba" },  // 山吹 → ビビッド黄
+    { name: "みどり",   a: [0.95, 0.10, 0.90], timbre: "flute"   },  // 松葉 → 鮮緑
+    { name: "だいだい", a: [0.05, 0.55, 1.05], timbre: "pluck"   },  // 橙
+    { name: "むらさき", a: [0.60, 1.00, 0.22], timbre: "bell"    },  // 菖蒲 → 明るい紫
+    { name: "すみ",     a: [0.85, 0.83, 0.79], timbre: "deep"    },  // 墨はアクセント役
+  ],
+  shibui: [
+    { name: "すみ",     a: [0.85, 0.83, 0.79], timbre: "deep"    },
+    { name: "あお",     a: [0.80, 0.66, 0.40], timbre: "chime"   },  // 藍
+    { name: "あか",     a: [0.26, 0.70, 0.74], timbre: "taiko"   },  // 朱
+    { name: "みどり",   a: [0.68, 0.55, 0.64], timbre: "flute"   },  // 松葉
+    { name: "きいろ",   a: [0.12, 0.30, 0.82], timbre: "marimba" },  // 山吹
+    { name: "むらさき", a: [0.52, 0.76, 0.32], timbre: "bell"    },  // 菖蒲
+  ],
+};
+function modeInks() { return INK_SETS[settings.mode] || INK_SETS.vivid; }
+
+let selectedDef = null;  // null = おまかせ（にじいろ自動: 1滴ごとに色が変わる）
+let autoIdx = 0;
+function nextDef() { return selectedDef || modeInks()[autoIdx++ % modeInks().length]; }
+// 発色ブースト: vivid は薄滴でも色がはっきり立つよう注入量を上げる
+function dropBoost() { return settings.mode === "vivid" ? 1.3 : 1.0; }
 
 /* ---------------- WebGL 初期化（WebGL2 → WebGL1 フォールバック） ---------------- */
 function getWebGLContext(canvas) {
@@ -661,25 +730,37 @@ function texCoord(clientX, clientY) {
   return [clientX / innerWidth, 1 - clientY / innerHeight];
 }
 
-// 墨滴: 中心に墨 + 外向きの弱い流れ（ゆっくり咲くように広がる）
-function inkDrop(clientX, clientY, big) {
+// 墨滴: 中心に墨 + 外向きの弱い流れ + 接線のうねり（タップだけで模様が動く）
+// opt: { def, scale, radius, ringScale } — 手のひらペタンは大きめで呼ぶ
+let dropSwirl = 1;  // うねりの回転方向を1滴ごとに反転（模様が単調にならない）
+function inkDrop(clientX, clientY, big, opt) {
+  opt = opt || {};
+  const def = opt.def || nextDef();
   const [x, y] = texCoord(clientX, clientY);
   // Ryo実機FB 2026-06-11 ×2「まだ多い・長く遊べるように」: 0.6→0.34→0.20。
   // 1滴は薄めに出る → にじみ広がりで存在感が出る。連打の黒化は MAX_DYE クランプが防ぐ
-  const ink = nextInk(big ? 0.20 : 0.12);
-  splat(x, y, 0, 0, ink, big ? 4.5 : 2.5);
-  // 外向きのごく弱い流れ（強くすると墨が霧散して消える・2026-06-11 プローブで実証）
+  const s = (opt.scale != null ? opt.scale : (big ? 0.20 : 0.12)) * dropBoost();
+  const ink = [def.a[0] * s, def.a[1] * s, def.a[2] * s];
+  splat(x, y, 0, 0, ink, opt.radius != null ? opt.radius : (big ? 4.5 : 2.5));
+  // 半径方向は弱く（強くすると墨が霧散して消える・2026-06-11 プローブで実証）、
+  // 接線方向の回転を足してタップだけで「うねり」が生まれるようにする
+  dropSwirl = -dropSwirl;
   const n = 6;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + Math.random();
     const r = 0.008;
+    const rad = config.SPLAT_FORCE * 0.012;
+    const tan = config.SPLAT_FORCE * 0.016 * dropSwirl;
     splatVelocityOnly(
       x + Math.cos(a) * r, y + Math.sin(a) * r,
-      Math.cos(a) * config.SPLAT_FORCE * 0.012,
-      Math.sin(a) * config.SPLAT_FORCE * 0.012,
+      Math.cos(a) * rad - Math.sin(a) * tan,
+      Math.sin(a) * rad + Math.cos(a) * tan,
       1.2
     );
   }
+  // 即時フィードバック: 波紋リング（にじみはゆっくりなので、反応の即時性はここで担保）
+  if (typeof fx !== "undefined") fx.ring(clientX, clientY, swatchCSS(def.a), opt.ringScale || (big ? 1 : 0.6));
+  return def;
 }
 
 // なぞり: 移動方向に流れ（毎イベント・操作感の維持）+ 墨は移動距離ベースで間引いて注入
@@ -696,38 +777,154 @@ function inkStroke(clientX, clientY, dxPx, dyPx) {
   strokeDistAcc += Math.hypot(dxPx / innerWidth, dyPx / innerHeight);
   if (strokeDistAcc >= config.STROKE_INK_DIST) {
     strokeDistAcc = 0;
-    const ink = nextInkSameColor(0.10);
+    const ink = nextInkSameColor(0.10 * dropBoost());
     splat(x, y, dx, dy, ink, 0.9);
+    // なぞりが旋律になる: Y位置の音高でごく小さく鳴らす（主張しすぎない音量）
+    tone(pentaFreq(pitchFromY(clientY)), { type: "sine", decay: 0.18, gain: 0.028 });
   }
 }
 
 // なぞり中は色を切り替えない（1ストローク1色）
 let strokeInk = null;
 function nextInkSameColor(scale) {
-  if (!strokeInk) strokeInk = selectedInk || INKS[inkIdx++ % INKS.length].a;
+  if (!strokeInk) strokeInk = nextDef().a;
   return [strokeInk[0] * scale, strokeInk[1] * scale, strokeInk[2] * scale];
 }
 
-/* ---------------- やさしい効果音 ---------------- */
+/* ---------------- やさしい効果音 ----------------
+ * 設計（2026-06-11 ベストプラクティス調査反映）:
+ *  - Y位置 → ペンタトニック音高（上ほど高い・Sago Mini Sound Box の音階ゾーン方式）
+ *  - 色ごとに音色（taiko/chime/marimba…・Baby's Musical Hands のゾーン理論を色に転用)
+ *  - 連打アルペジオ: 連続タップで音が上昇 = 連打を抑制せず「演奏」として報酬化
+ *  - 水音レイヤー: ノイズ→バンドパス降下の合成水音を薄く重ねる（Pok Pok 手録り音の方向性）
+ */
 let audio = null;
-const PENTA = [523.25, 587.33, 659.25, 783.99, 880.0];
-function plip() {
+let noiseBuf = null;
+let muted = false;  // おやすみタイマー満了中は鳴らさない
+const PENTA = [523.25, 587.33, 659.25, 783.99, 880.0];  // C5 D5 E5 G5 A5
+
+function ac() {
+  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+  if (audio.state === "suspended") audio.resume();
+  return audio;
+}
+// 0..9 → 2オクターブのペンタトニック（下: C4..A4 / 上: C5..A5）
+function pentaFreq(idx) {
+  idx = Math.max(0, Math.min(9, Math.round(idx)));
+  return PENTA[idx % 5] * (idx < 5 ? 0.5 : 1);
+}
+function pitchFromY(clientY) {
+  return Math.round((1 - clientY / innerHeight) * 9);
+}
+
+function tone(freq, opt) {
+  if (muted) return;
+  opt = opt || {};
   try {
-    if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
-    if (audio.state === "suspended") audio.resume();
-    const osc = audio.createOscillator();
-    const gain = audio.createGain();
-    const f = PENTA[Math.floor(Math.random() * PENTA.length)] * (Math.random() < 0.3 ? 0.5 : 1);
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(f * 1.4, audio.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(f, audio.currentTime + 0.08);
-    gain.gain.setValueAtTime(0.001, audio.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.09, audio.currentTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.45);
-    osc.connect(gain).connect(audio.destination);
-    osc.start();
-    osc.stop(audio.currentTime + 0.5);
+    const ctx = ac(), t0 = ctx.currentTime;
+    const attack = opt.attack || 0.012, decay = opt.decay || 0.4, gain = opt.gain || 0.08;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0.001, t0);
+    out.gain.exponentialRampToValueAtTime(gain, t0 + attack);
+    out.gain.exponentialRampToValueAtTime(0.001, t0 + attack + decay);
+    if (opt.lp) {
+      const f = ctx.createBiquadFilter();
+      f.type = "lowpass"; f.frequency.value = opt.lp;
+      out.connect(f); f.connect(ctx.destination);
+    } else {
+      out.connect(ctx.destination);
+    }
+    const osc = ctx.createOscillator();
+    osc.type = opt.type || "sine";
+    if (opt.slideFrom) {
+      osc.frequency.setValueAtTime(opt.slideFrom, t0);
+      osc.frequency.exponentialRampToValueAtTime(freq, t0 + 0.08);
+    } else {
+      osc.frequency.setValueAtTime(freq, t0);
+    }
+    osc.connect(out);
+    osc.start(t0); osc.stop(t0 + attack + decay + 0.05);
+    if (opt.partial) {  // 倍音を1本足して楽器らしさを出す
+      const o2 = ctx.createOscillator(), g2 = ctx.createGain();
+      o2.type = "sine";
+      o2.frequency.setValueAtTime(freq * (opt.partialRatio || 2), t0);
+      g2.gain.setValueAtTime(0.001, t0);
+      g2.gain.exponentialRampToValueAtTime(gain * opt.partial, t0 + attack);
+      g2.gain.exponentialRampToValueAtTime(0.001, t0 + attack + decay * 0.6);
+      o2.connect(g2).connect(ctx.destination);
+      o2.start(t0); o2.stop(t0 + decay);
+    }
   } catch (e) { /* 音が出なくても遊べる */ }
+}
+
+// 合成の水音（ぽちゃ）: ホワイトノイズ→バンドパス周波数降下
+function splashNoise(big) {
+  if (muted) return;
+  try {
+    const ctx = ac(), t0 = ctx.currentTime;
+    if (!noiseBuf) {
+      noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.5), ctx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(big ? 520 : 900, t0);
+    bp.frequency.exponentialRampToValueAtTime(big ? 180 : 350, t0 + 0.22);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.001, t0);
+    g.gain.exponentialRampToValueAtTime(big ? 0.07 : 0.032, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + (big ? 0.4 : 0.25));
+    src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    src.start(t0); src.stop(t0 + 0.5);
+  } catch (e) {}
+}
+
+// 色 → 音色
+const TIMBRES = {
+  taiko:   (f) => tone(Math.max(110, f * 0.25), { decay: 0.35, gain: 0.12, slideFrom: Math.max(150, f * 0.35) }),
+  chime:   (f) => { tone(f, { decay: 0.9, gain: 0.07 }); tone(f * 2.01, { decay: 0.7, gain: 0.022 }); },
+  marimba: (f) => tone(f, { decay: 0.3, gain: 0.10, partial: 0.4, partialRatio: 4 }),
+  flute:   (f) => tone(f, { type: "triangle", attack: 0.05, decay: 0.5, gain: 0.07, lp: 2200 }),
+  pluck:   (f) => tone(f, { type: "sawtooth", decay: 0.28, gain: 0.045, lp: 1800 }),
+  bell:    (f) => tone(f, { decay: 0.8, gain: 0.07, partial: 0.5, partialRatio: 2.76 }),
+  deep:    (f) => tone(f * 0.5, { decay: 0.45, gain: 0.09, slideFrom: f * 0.7 }),
+};
+
+// 連打アルペジオの状態（pointerdown で更新）
+let combo = 0, lastTapTime = 0;
+
+function dropSound(def, clientY, palm) {
+  if (palm) {  // 手のひらペタン: 低い「ぼちゃん」
+    TIMBRES.deep(pentaFreq(1));
+    splashNoise(true);
+    return;
+  }
+  const idx = pitchFromY(clientY) + Math.min(combo, 4);  // 連打で上昇
+  (TIMBRES[def.timbre] || TIMBRES.deep)(pentaFreq(idx));
+  splashNoise(false);
+}
+
+// UIボタン用の従来 plip（ランダムなペンタトニック1音）
+function plip() {
+  tone(PENTA[Math.floor(Math.random() * PENTA.length)] * (Math.random() < 0.3 ? 0.5 : 1) * 1.0,
+       { decay: 0.45, gain: 0.09, slideFrom: 700 });
+}
+
+/* ---------------- 色名よみあげ（親パネルでON・コビューイング支援） ---------------- */
+let lastVoiceAt = 0;
+function sayColor(name) {
+  if (!settings.voice || muted) return;
+  const now = Date.now();
+  if (now - lastVoiceAt < 1600) return;  // 連打で声が渋滞しないようスロットリング
+  lastVoiceAt = now;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(name);
+    u.lang = "ja-JP"; u.rate = 0.8; u.pitch = 1.3; u.volume = 0.9;
+    speechSynthesis.speak(u);
+  } catch (e) {}
 }
 
 /* ---------------- 入力（マルチタッチ対応） ---------------- */
@@ -735,16 +932,39 @@ const pointers = new Map();
 let lastTouchAt = Date.now();
 let washFramesLeft = 0;
 let washTimer = null;
+let panelTimer = null;  // 4本指1.5秒ホールド → 親パネル（こどもロック中の唯一の入口）
+
+// ときどきサプライズ: 10〜15タップに1回、桜吹雪 or 金魚ジャンプ（隠し発見 = emergent reward）
+let tapsUntilSurprise = 10 + Math.floor(Math.random() * 6);
+function countSurprise() {
+  if (--tapsUntilSurprise > 0) return;
+  tapsUntilSurprise = 10 + Math.floor(Math.random() * 6);
+  if (Math.random() < 0.55) fx.sakura(); else fx.fishJump();
+}
 
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
+  if (bedtime) return;
   lastTouchAt = Date.now();
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   strokeInk = null;
-  inkDrop(e.clientX, e.clientY, true);
-  plip();
+  // 連打アルペジオ: 700ms 以内の連続タップで音が上がっていく
+  const now = performance.now();
+  combo = now - lastTapTime < 700 ? combo + 1 : 0;
+  lastTapTime = now;
+  // 手のひらペタン検出: 接触楕円が指よりずっと大きい → 特大の滴 + 低い「ぼちゃん」
+  const palm = (e.width || 0) >= 36;
+  const def = inkDrop(e.clientX, e.clientY, true,
+                      palm ? { scale: 0.30, radius: 9, ringScale: 1.7 } : null);
+  dropSound(def, e.clientY, palm);
+  sayColor(def.name);
+  fx.fishTarget(e.clientX, e.clientY);
+  countSurprise();
   if (pointers.size === 3) {
     washTimer = setTimeout(() => { if (pointers.size === 3) washFramesLeft = 110; }, 1200);
+  } else if (pointers.size === 4) {
+    if (washTimer) { clearTimeout(washTimer); washTimer = null; }
+    panelTimer = setTimeout(() => { if (pointers.size === 4) openPanel(); }, 1500);
   } else if (washTimer) {
     clearTimeout(washTimer); washTimer = null;
   }
@@ -754,10 +974,12 @@ canvas.addEventListener("pointermove", (e) => {
   const pt = pointers.get(e.pointerId);
   if (!pt) return;
   e.preventDefault();
+  if (bedtime) return;
   lastTouchAt = Date.now();
   const dx = e.clientX - pt.x, dy = e.clientY - pt.y;
   if (dx * dx + dy * dy < 2) return;
   inkStroke(e.clientX, e.clientY, dx, dy);
+  fx.fishTarget(e.clientX, e.clientY);  // 金魚はなぞっている指も追いかける
   pt.x = e.clientX; pt.y = e.clientY;
 });
 
@@ -766,6 +988,7 @@ function release(e) {
   strokeInk = null;
   strokeDistAcc = 0;
   if (washTimer && pointers.size !== 3) { clearTimeout(washTimer); washTimer = null; }
+  if (panelTimer && pointers.size !== 4) { clearTimeout(panelTimer); panelTimer = null; }
 }
 canvas.addEventListener("pointerup", release);
 canvas.addEventListener("pointercancel", release);
@@ -782,39 +1005,54 @@ function swatchCSS(a) {
 }
 const paletteEl = document.getElementById("palette");
 const palBtn = document.getElementById("palBtn");
-PALETTE_INKS.forEach((def, i) => {
-  const b = document.createElement("button");
-  b.className = "sw" + (i === 0 ? " sel" : "");
-  b.setAttribute("aria-label", def.name);
-  if (def.a) {
-    b.style.background = swatchCSS(def.a);
-  } else {
-    // おまかせ: 固定色たちの円環グラデーション
-    const stops = PALETTE_INKS.slice(1).map((d, j, arr) =>
-      `${swatchCSS(d.a)} ${Math.round((j / arr.length) * 360)}deg`).join(", ");
-    b.style.background = `conic-gradient(${stops})`;
-  }
-  b.addEventListener("pointerdown", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    lastTouchAt = Date.now();          // パレット操作中に自動演出を始めない
-    selectedInk = def.a;
-    strokeInk = null;
-    paletteEl.querySelectorAll(".sw").forEach((el) => el.classList.remove("sel"));
-    b.classList.add("sel");
-    plip();
-    paletteEl.classList.remove("open");  // 選んだら自動で閉じてキャンバスに戻す
-    // 選んだ色がすぐ見える: 画面中央やや上に小さな墨滴を落とす
-    inkDrop(innerWidth / 2, innerHeight * 0.4, false);
+function buildPalette() {
+  paletteEl.innerHTML = "";
+  const defs = [{ name: "おまかせ", a: null }].concat(modeInks());
+  defs.forEach((def) => {
+    const b = document.createElement("button");
+    const isSel = def.a === null ? selectedDef === null : selectedDef === def;
+    b.className = "sw" + (isSel ? " sel" : "");
+    b.setAttribute("aria-label", def.name);
+    if (def.a) {
+      b.style.background = swatchCSS(def.a);
+    } else {
+      // おまかせ: 現モードの固定色たちの円環グラデーション
+      const stops = modeInks().map((d, j, arr) =>
+        `${swatchCSS(d.a)} ${Math.round((j / arr.length) * 360)}deg`).join(", ");
+      b.style.background = `conic-gradient(${stops})`;
+    }
+    b.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      lastTouchAt = Date.now();          // パレット操作中に自動演出を始めない
+      selectedDef = def.a ? def : null;
+      strokeInk = null;
+      paletteEl.querySelectorAll(".sw").forEach((el) => el.classList.remove("sel"));
+      b.classList.add("sel");
+      plip();
+      if (def.a) sayColor(def.name);
+      paletteEl.classList.remove("open");  // 選んだら自動で閉じてキャンバスに戻す
+      // 選んだ色がすぐ見える: 画面中央やや上に小さな墨滴を落とす
+      inkDrop(innerWidth / 2, innerHeight * 0.4, false, def.a ? { def } : null);
+    });
+    paletteEl.appendChild(b);
   });
-  paletteEl.appendChild(b);
-});
+}
+buildPalette();
 
+// 🎨: タップでパレット開閉 / 2.5秒長押しで親パネル（おうちのかたメニュー）
+let palHoldTimer = null;
 palBtn.addEventListener("pointerdown", (e) => {
   e.preventDefault(); e.stopPropagation();
   lastTouchAt = Date.now();
   paletteEl.classList.toggle("open");
   plip();
+  palHoldTimer = setTimeout(() => {
+    paletteEl.classList.remove("open");
+    openPanel();
+  }, 2500);
 });
+["pointerup", "pointercancel", "pointerleave"].forEach((ev) =>
+  palBtn.addEventListener(ev, () => { if (palHoldTimer) { clearTimeout(palHoldTimer); palHoldTimer = null; } }));
 
 const washBtn = document.getElementById("washBtn");
 washBtn.addEventListener("pointerdown", (e) => {
@@ -827,6 +1065,368 @@ washBtn.addEventListener("pointerdown", (e) => {
 
 // キャンバスで遊び始めたらパレットは引っ込める
 canvas.addEventListener("pointerdown", () => paletteEl.classList.remove("open"));
+
+/* ============================================================
+ * FXオーバーレイ（2D canvas・タッチ透過）
+ *   - 波紋リング: タップへの<100ms即時フィードバック（にじみはゆっくりでOKになる）
+ *   - 金魚2匹: 指を追って泳ぐ・流体に引き波を残す（墨が魚のあとでうねる）
+ *   - 桜吹雪: サプライズ演出。着水で小さな桜色のにじみ
+ * ============================================================ */
+const fx = (() => {
+  const cv = document.getElementById("fx");
+  const ctx2 = cv.getContext("2d");
+  let DPR = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.round(innerWidth * DPR), h = Math.round(innerHeight * DPR);
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  }
+  resize();
+
+  const rings = [], petals = [], fishes = [];
+
+  function ring(px, py, color, scale) {
+    rings.push({ x: px, y: py, max: 80 * (scale || 1), color, t: 0 });
+  }
+
+  /* ---- 金魚 ---- */
+  for (let i = 0; i < 2; i++) {
+    fishes.push({
+      x: innerWidth * (0.32 + 0.36 * i), y: innerHeight * (0.3 + 0.35 * i),
+      vx: 25, vy: 8, angle: 0, phase: Math.random() * 6,
+      hue: i === 0 ? "#e8633a" : "#f3f1ea",   // 緋鯉と白鯉
+      hue2: i === 0 ? "#f2a98c" : "#dcd9cf",
+      spot: i === 1,                            // 白鯉は背に緋の斑
+      wanderX: innerWidth * 0.5, wanderY: innerHeight * 0.5, wanderAt: 0,
+      jump: 0, wake: 0,
+    });
+  }
+  let touchX = null, touchY = null, touchAt = -1e9;
+  function fishTarget(px, py) { touchX = px; touchY = py; touchAt = performance.now(); }
+  function fishJump() {
+    const f = fishes[Math.floor(Math.random() * fishes.length)];
+    if (f && f.jump === 0) f.jump = 0.0001;
+  }
+
+  function stepFish(f, dt, now) {
+    if (f.jump > 0) {  // ジャンプ演出（0→1で放物線・着水で波紋と水音）
+      f.jump += dt / 0.9;
+      f.x += f.vx * dt * 0.4; f.y += f.vy * dt * 0.4;
+      if (f.jump >= 1) {
+        f.jump = 0;
+        ring(f.x, f.y, "rgba(110,130,150,0.9)", 1.5);
+        splashNoise(true);
+        const [u, v] = texCoord(f.x, f.y);
+        splat(u, v, 0, 0, [0.04, 0.04, 0.05], 3.0);  // 着水の薄い水紋を流体にも
+      }
+      return;
+    }
+    const chasing = now - touchAt < 4000;
+    let tx, ty, speed;
+    if (chasing) { tx = touchX; ty = touchY; speed = 230; }
+    else {
+      if (now > f.wanderAt) {
+        f.wanderX = innerWidth * (0.1 + Math.random() * 0.8);
+        f.wanderY = innerHeight * (0.1 + Math.random() * 0.8);
+        f.wanderAt = now + 2500 + Math.random() * 3000;
+      }
+      tx = f.wanderX; ty = f.wanderY; speed = 60;
+    }
+    let dx = tx - f.x, dy = ty - f.y;
+    if (chasing && Math.hypot(dx, dy) < 75) {  // 指に着いたら周りをくるくる旋回
+      const orbit = now * 0.0018 + f.phase;
+      dx = tx + Math.cos(orbit) * 55 - f.x;
+      dy = ty + Math.sin(orbit) * 55 - f.y;
+    }
+    const d = Math.hypot(dx, dy) || 1;
+    const steer = chasing ? 3.0 : 1.1;
+    f.vx += ((dx / d) * speed - f.vx) * Math.min(1, steer * dt);
+    f.vy += ((dy / d) * speed - f.vy) * Math.min(1, steer * dt);
+    const m = 30;  // 画面端よけ
+    if (f.x < m) f.vx += 140 * dt;
+    if (f.x > innerWidth - m) f.vx -= 140 * dt;
+    if (f.y < m) f.vy += 140 * dt;
+    if (f.y > innerHeight - m) f.vy -= 140 * dt;
+    f.x += f.vx * dt; f.y += f.vy * dt;
+    const targetAngle = Math.atan2(f.vy, f.vx);
+    let da = targetAngle - f.angle;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    f.angle += da * Math.min(1, 6 * dt);
+    // 引き波: 魚の動きを流体に注入 → 墨が魚のあとを追ってうねる
+    if ((f.wake = (f.wake + 1) % 4) === 0) {
+      const [u, v] = texCoord(f.x, f.y);
+      splatVelocityOnly(u, v,
+        (f.vx / innerWidth) * config.SPLAT_FORCE * 0.12,
+        (-f.vy / innerHeight) * config.SPLAT_FORCE * 0.12, 0.8);
+    }
+  }
+
+  function drawFish(f, now) {
+    let jy = 0, scale = 1;
+    if (f.jump > 0) {
+      jy = -Math.sin(f.jump * Math.PI) * 90;
+      scale = 1 + Math.sin(f.jump * Math.PI) * 0.35;
+    }
+    ctx2.save();
+    ctx2.translate(f.x * DPR, (f.y + jy) * DPR);
+    ctx2.rotate(f.angle);
+    ctx2.scale(scale * DPR, scale * DPR);
+    ctx2.globalAlpha = 0.82;
+    const wag = Math.sin(now * 0.012 + f.phase) * 0.45;
+    ctx2.fillStyle = f.hue;
+    ctx2.beginPath();  // ひらひらの尾
+    ctx2.moveTo(-13, 0);
+    ctx2.quadraticCurveTo(-30, -10 + wag * 14, -36, -6 + wag * 16);
+    ctx2.quadraticCurveTo(-26, wag * 6, -36, 8 + wag * 16);
+    ctx2.quadraticCurveTo(-30, 10 + wag * 14, -13, 0);
+    ctx2.fill();
+    const grad = ctx2.createLinearGradient(-16, 0, 20, 0);  // 胴体
+    grad.addColorStop(0, f.hue);
+    grad.addColorStop(1, f.hue2);
+    ctx2.fillStyle = grad;
+    ctx2.beginPath();
+    ctx2.ellipse(0, 0, 19, 8.5, 0, 0, Math.PI * 2);
+    ctx2.fill();
+    if (f.spot) {  // 白鯉の緋斑
+      ctx2.fillStyle = "#e8633a";
+      ctx2.beginPath(); ctx2.ellipse(4, -2, 6, 4, 0.4, 0, Math.PI * 2); ctx2.fill();
+    }
+    ctx2.globalAlpha = 0.55;  // 胸びれ
+    ctx2.fillStyle = f.hue;
+    ctx2.beginPath(); ctx2.ellipse(2, -9, 6, 2.6, -0.7 + wag * 0.3, 0, Math.PI * 2); ctx2.fill();
+    ctx2.beginPath(); ctx2.ellipse(2, 9, 6, 2.6, 0.7 - wag * 0.3, 0, Math.PI * 2); ctx2.fill();
+    ctx2.globalAlpha = 0.85;  // 目（上から見た姿なので両側）
+    ctx2.fillStyle = "#3a3430";
+    ctx2.beginPath(); ctx2.arc(13, -3.2, 1.7, 0, Math.PI * 2); ctx2.fill();
+    ctx2.beginPath(); ctx2.arc(13, 3.2, 1.7, 0, Math.PI * 2); ctx2.fill();
+    ctx2.restore();
+  }
+
+  /* ---- 桜吹雪 ---- */
+  function sakura() {
+    const n = 5 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < n; i++) {
+      petals.push({
+        x: Math.random() * innerWidth, y: -20 - Math.random() * 140,
+        vy: 35 + Math.random() * 30,
+        sway: Math.random() * 6, swayAmp: 18 + Math.random() * 22,
+        rot: Math.random() * 6, vrot: (Math.random() - 0.5) * 2,
+        landY: innerHeight * (0.3 + Math.random() * 0.55), landed: 0, life: 1,
+      });
+    }
+  }
+
+  function stepPetal(p, dt) {
+    if (!p.landed) {
+      p.y += p.vy * dt;
+      p.sway += dt * 2.2;
+      p.x += Math.cos(p.sway) * p.swayAmp * dt;
+      p.rot += p.vrot * dt;
+      if (p.y >= p.landY) {
+        p.landed = 1;
+        ring(p.x, p.y, "rgba(238,170,190,0.85)", 0.5);
+        tone(pentaFreq(5 + Math.floor(Math.random() * 5)), { decay: 0.5, gain: 0.035 });
+        const [u, v] = texCoord(p.x, p.y);
+        splat(u, v, 0, 0, [0.01, 0.18, 0.06], 1.6);  // ほのかな桜色のにじみ
+      }
+    } else {
+      p.life -= dt / 7;  // 水面でゆっくり流れて消える
+      p.x += 6 * dt;
+      p.rot += p.vrot * 0.2 * dt;
+    }
+  }
+
+  function drawPetal(p) {
+    ctx2.save();
+    ctx2.translate(p.x * DPR, p.y * DPR);
+    ctx2.rotate(p.rot);
+    ctx2.scale(DPR, DPR);
+    ctx2.globalAlpha = 0.85 * Math.max(0, Math.min(1, p.life));
+    ctx2.fillStyle = "#f5b8c8";
+    ctx2.beginPath();  // 先端に切れ込みのある桜の花弁
+    ctx2.moveTo(0, 5);
+    ctx2.quadraticCurveTo(-6, -1, -3.4, -5);
+    ctx2.quadraticCurveTo(-1.5, -3.4, 0, -4.6);
+    ctx2.quadraticCurveTo(1.5, -3.4, 3.4, -5);
+    ctx2.quadraticCurveTo(6, -1, 0, 5);
+    ctx2.fill();
+    ctx2.restore();
+  }
+
+  function update(dt, now, hidden) {
+    ctx2.clearRect(0, 0, cv.width, cv.height);
+    if (hidden) return;  // おやすみ中は描かない
+    for (let i = rings.length - 1; i >= 0; i--) {
+      const r = rings[i];
+      r.t += dt;
+      const k = r.t / 0.5;
+      if (k >= 1) { rings.splice(i, 1); continue; }
+      const ease = 1 - Math.pow(1 - k, 3);
+      ctx2.globalAlpha = 0.55 * (1 - k);
+      ctx2.strokeStyle = r.color;
+      ctx2.lineWidth = (3 - 2 * k) * DPR;
+      ctx2.beginPath();
+      ctx2.arc(r.x * DPR, r.y * DPR, (8 + (r.max - 8) * ease) * DPR, 0, Math.PI * 2);
+      ctx2.stroke();
+    }
+    ctx2.globalAlpha = 1;
+    for (let i = petals.length - 1; i >= 0; i--) {
+      stepPetal(petals[i], dt);
+      if (petals[i].life <= 0) { petals.splice(i, 1); continue; }
+      drawPetal(petals[i]);
+    }
+    for (const f of fishes) { stepFish(f, dt, now); drawFish(f, now); }
+  }
+
+  return { resize, ring, fishTarget, fishJump, sakura, update };
+})();
+
+/* ---------------- 傾きで墨が流れる（DeviceOrientation） ----------------
+ * iOS は権限ダイアログが必要 → 親パネルの操作（user gesture）からのみ要求。
+ * Android 等の権限不要環境は設定が ON なら起動時から有効。 */
+let tiltX = 0, tiltY = 0, tiltActive = false;
+function startTiltListener() {
+  if (tiltActive) return;
+  tiltActive = true;
+  settings.tilt = true; saveSettings();
+  window.addEventListener("deviceorientation", (e) => {
+    if (e.gamma == null || e.beta == null) return;
+    tiltX = Math.max(-1, Math.min(1, e.gamma / 35));   // 左右
+    tiltY = Math.max(-1, Math.min(1, e.beta / 35));    // 前後
+  });
+}
+function enableTilt(fromGesture) {
+  const D = window.DeviceOrientationEvent;
+  if (D && typeof D.requestPermission === "function") {
+    if (!fromGesture) return;  // iOS はユーザー操作起点でしか権限要求できない
+    D.requestPermission().then((s) => {
+      if (s === "granted") { startTiltListener(); refreshPanel(); }
+    }).catch(() => {});
+  } else {
+    startTiltListener();
+  }
+}
+if (settings.tilt) enableTilt(false);
+function applyTilt() {
+  if (!tiltActive) return;
+  const mag = Math.hypot(tiltX, tiltY);
+  if (mag < 0.14) return;  // 机に置いたら止まるデッドゾーン
+  for (let i = 0; i < 2; i++) {
+    splatVelocityOnly(Math.random(), Math.random(),
+      tiltX * config.SPLAT_FORCE * 0.02 * mag,
+      -tiltY * config.SPLAT_FORCE * 0.02 * mag, 8);
+  }
+}
+
+/* ---------------- おやすみタイマー（AAP/BabblePlay: 意図的なセッション区切り） ---------------- */
+let timerDeadline = settings.timerMin > 0 ? Date.now() + settings.timerMin * 60000 : null;
+let bedtime = false;
+const sunsetEl = document.getElementById("sunset");
+function checkBedtime() {
+  if (!bedtime && timerDeadline && Date.now() > timerDeadline) startBedtime();
+}
+function startBedtime() {
+  bedtime = true;
+  muted = true;
+  try { speechSynthesis.cancel(); } catch (e) {}
+  sunsetEl.classList.add("on");
+  requestAnimationFrame(() => sunsetEl.classList.add("visible"));
+}
+function endBedtime() {
+  bedtime = false;
+  muted = false;
+  timerDeadline = null;
+  settings.timerMin = 0; saveSettings();
+  sunsetEl.classList.remove("visible");
+  setTimeout(() => sunsetEl.classList.remove("on"), 6100);
+  refreshPanel();
+}
+// 解除は「つきを2秒ながおし」（親だけが分かる操作）
+let moonTimer = null;
+const moonEl = document.getElementById("moon");
+moonEl.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  moonTimer = setTimeout(endBedtime, 2000);
+});
+["pointerup", "pointercancel", "pointerleave"].forEach((ev) =>
+  moonEl.addEventListener(ev, () => { if (moonTimer) { clearTimeout(moonTimer); moonTimer = null; } }));
+
+/* ---------------- 作品の保存（流す前に1枚） ---------------- */
+function saveArt() {
+  render();  // preserveDrawingBuffer:false でも直後の toBlob は同一タスク内なら内容が残る
+  canvas.toBlob(async (blob) => {
+    if (!blob) return;
+    const file = new File([blob], "suminagashi-" + Date.now() + ".png", { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); return; } catch (e) { /* キャンセル時は下へ */ }
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = file.name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }, "image/png");
+}
+
+/* ---------------- おうちのかたメニュー ---------------- */
+const panelEl = document.getElementById("panel");
+panelEl.innerHTML = `
+  <h2>おうちのかたメニュー</h2>
+  <div class="prow"><span>いろあい</span><button class="pbtn" id="pMode"></button></div>
+  <div class="prow"><span>いろの よみあげ</span><button class="pbtn" id="pVoice"></button></div>
+  <div class="prow"><span>ボタンかくし<br><small>もどすには 4ほんゆび ながおし</small></span><button class="pbtn" id="pLock"></button></div>
+  <div class="prow"><span>おやすみタイマー</span><button class="pbtn" id="pTimer"></button></div>
+  <div class="prow"><span>かたむきで ながれる</span><button class="pbtn" id="pTilt"></button></div>
+  <div class="prow"><span>さくひんを のこす</span><button class="pbtn" id="pSave">📷 ほぞん</button></div>
+  <button id="panelClose">とじる</button>
+`;
+const pMode = document.getElementById("pMode");
+const pVoice = document.getElementById("pVoice");
+const pLock = document.getElementById("pLock");
+const pTimer = document.getElementById("pTimer");
+const pTilt = document.getElementById("pTilt");
+function refreshPanel() {
+  pMode.textContent = settings.mode === "vivid" ? "はなやか" : "しぶい";
+  pVoice.textContent = settings.voice ? "ON" : "OFF";
+  pVoice.classList.toggle("on", settings.voice);
+  pLock.textContent = settings.lock ? "ON" : "OFF";
+  pLock.classList.toggle("on", settings.lock);
+  pTimer.textContent = settings.timerMin === 0 ? "なし" : settings.timerMin + "ふん";
+  pTimer.classList.toggle("on", settings.timerMin > 0);
+  pTilt.textContent = tiltActive ? "ON" : "ゆるす";
+  pTilt.classList.toggle("on", tiltActive);
+}
+function openPanel() {
+  lastTouchAt = Date.now();
+  refreshPanel();
+  panelEl.classList.add("open");
+}
+function closePanel() { panelEl.classList.remove("open"); }
+pMode.addEventListener("click", () => {
+  settings.mode = settings.mode === "vivid" ? "shibui" : "vivid";
+  selectedDef = null; strokeInk = null;
+  saveSettings(); buildPalette(); refreshPanel();
+});
+pVoice.addEventListener("click", () => {
+  settings.voice = !settings.voice;
+  saveSettings(); refreshPanel();
+  if (settings.voice) { lastVoiceAt = 0; sayColor("よみあげ オン"); }
+});
+pLock.addEventListener("click", () => {
+  settings.lock = !settings.lock;
+  document.body.classList.toggle("locked", settings.lock);
+  saveSettings(); refreshPanel();
+});
+pTimer.addEventListener("click", () => {
+  settings.timerMin = settings.timerMin === 0 ? 5 : settings.timerMin === 5 ? 10 : 0;
+  timerDeadline = settings.timerMin > 0 ? Date.now() + settings.timerMin * 60000 : null;
+  saveSettings(); refreshPanel();
+});
+pTilt.addEventListener("click", () => enableTilt(true));
+document.getElementById("pSave").addEventListener("click", saveArt);
+document.getElementById("panelClose").addEventListener("click", closePanel);
+document.body.classList.toggle("locked", settings.lock);
 
 /* ---------------- 自動演出: ゆるやかな筆運び ---------------- */
 // URL に ?demo を付けると即時開始（スクリーンショット検証用）
@@ -874,7 +1474,7 @@ function seedDemo() {
   render();
   probeCanvas("after-render");
   // --- 決定論ストローク: (0.30,0.65)→(0.54,0.65) の直線。経路上を計測 ---
-  const a0 = INKS[0].a;
+  const a0 = modeInks()[0].a;
   for (let i = 0; i < 60; i++) {
     splat(0.30 + i * 0.004, 0.65, 0.004 * config.SPLAT_FORCE * 0.5, 0,
           [a0[0] * 0.28, a0[1] * 0.28, a0[2] * 0.28], 1.2);
@@ -910,7 +1510,7 @@ function seedDemo() {
     let x = 0.2 + Math.random() * 0.6;
     let y = 0.25 + Math.random() * 0.5;
     let ang = Math.random() * Math.PI * 2;
-    const a = INKS[inkIdx++ % INKS.length].a;
+    const a = modeInks()[autoIdx++ % modeInks().length].a;
     const steps = 50 + Math.floor(Math.random() * 50);
     for (let i = 0; i < steps; i++) {
       ang += (Math.random() - 0.5) * 0.5;
@@ -942,7 +1542,7 @@ function updateGhost(dt) {
       speed: 0.06 + Math.random() * 0.10,
       turn: (Math.random() - 0.5) * 2.4,
       ttl: 2.5 + Math.random() * 3.5,
-      ink: selectedInk || INKS[inkIdx++ % INKS.length].a,
+      ink: nextDef().a,
     };
   }
   ghost.angle += ghost.turn * dt;
@@ -965,16 +1565,21 @@ let lastTime = performance.now();
 function frame(now) {
   const dt = Math.min((now - lastTime) / 1000, 0.0166);
   lastTime = now;
-  if (resizeCanvas()) initFramebuffers();
-  if (washFramesLeft > 0) {
+  if (resizeCanvas()) { initFramebuffers(); fx.resize(); }
+  checkBedtime();
+  if (bedtime) {
+    densityDissipation = 0.8;            // おやすみ: 紙がゆっくり乾いていく
+  } else if (washFramesLeft > 0) {
     washFramesLeft--;
     densityDissipation = 4.0;            // 洗い流し: 墨を急速に薄める
   } else {
     densityDissipation = config.DENSITY_DISSIPATION;
   }
-  updateGhost(dt);
+  applyTilt();
+  if (!bedtime) updateGhost(dt);
   step(dt);
   render();
+  fx.update(dt, now, bedtime);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
