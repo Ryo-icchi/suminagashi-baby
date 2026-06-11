@@ -9,7 +9,7 @@ rm -f /tmp/sumi_shot.png
 python3 -m http.server 8765 >/dev/null 2>&1 &
 SERVER_PID=$!
 PROFILE=$(mktemp -d)
-trap 'kill $SERVER_PID 2>/dev/null || true; rm -rf "$PROFILE"' EXIT
+trap 'kill $SERVER_PID 2>/dev/null || true; chmod -R u+w "$PROFILE" 2>/dev/null; rm -rf "$PROFILE" 2>/dev/null || true' EXIT
 sleep 1
 
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"

@@ -24,13 +24,56 @@
     overscroll-behavior: none;
   }
   canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+
+  /* ---- 色パレット & ながすボタン（1歳児向け: 大きい・壊れない・押すと必ず何か起きる） ---- */
+  #palette {
+    position: fixed;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 12px;
+    padding: 10px 14px;
+    background: rgba(241, 235, 222, 0.78);
+    border-radius: 999px;
+    box-shadow: 0 2px 14px rgba(60, 50, 30, 0.20);
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    touch-action: none;
+  }
+  .sw {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.55);
+    box-shadow: 0 1px 4px rgba(60, 50, 30, 0.25);
+    padding: 0;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+  }
+  .sw.sel {
+    border-color: #6b5d49;
+    transform: scale(1.15);
+  }
+  #washBtn {
+    position: fixed;
+    right: calc(14px + env(safe-area-inset-right, 0px));
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    width: 62px; height: 62px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.55);
+    background: rgba(241, 235, 222, 0.78);
+    box-shadow: 0 2px 14px rgba(60, 50, 30, 0.20);
+    font-size: 30px; line-height: 1;
+    touch-action: none;
+  }
+  #washBtn:active { transform: scale(0.92); }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="palette"></div>
+<button id="washBtn" aria-label="ながす">🌊</button>
 <script>
 "use strict";
-console.log("SUMI build: v2-fluid-seed");
+console.log("SUMI build: v3-color-ui");
 window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" + line); };
 
 /* ============================================================
@@ -46,6 +89,8 @@ window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" +
  * 操作（説明不要設計）:
  *   タッチ      → 墨滴がぽとりと落ちて、ゆっくりにじむ
  *   なぞる      → 墨が流れる
+ *   下のパレット → 色を選ぶ（おまかせ=自動切替）。選ぶと中央に試し滴
+ *   🌊ボタン    → 洗い流してリセット（3本指ホールドと同じ）
  *   12秒放置    → 自動演出（ゆるやかな筆運びが勝手に始まる）
  *   3本指ホールド→ 洗い流す（親用）
  * ============================================================ */
@@ -76,9 +121,20 @@ const INKS = [
   { a: [0.85, 0.83, 0.79] },  // 墨
   { a: [0.68, 0.55, 0.64] },  // 松葉
 ];
+// パレットの固定色（おまかせ=null は従来どおり INKS を順繰り）
+const PALETTE_INKS = [
+  { name: "おまかせ", a: null },
+  { name: "墨",   a: [0.85, 0.83, 0.79] },
+  { name: "藍",   a: [0.80, 0.66, 0.40] },
+  { name: "朱",   a: [0.26, 0.70, 0.74] },
+  { name: "松葉", a: [0.68, 0.55, 0.64] },
+  { name: "山吹", a: [0.12, 0.30, 0.82] },
+  { name: "菖蒲", a: [0.52, 0.76, 0.32] },
+];
+let selectedInk = null;  // null = おまかせ（自動切替）
 let inkIdx = 0;
 function nextInk(scale) {
-  const a = INKS[inkIdx++ % INKS.length].a;
+  const a = selectedInk || INKS[inkIdx++ % INKS.length].a;
   return [a[0] * scale, a[1] * scale, a[2] * scale];
 }
 
@@ -608,7 +664,7 @@ function inkStroke(clientX, clientY, dxPx, dyPx) {
 // なぞり中は色を切り替えない（1ストローク1色）
 let strokeInk = null;
 function nextInkSameColor(scale) {
-  if (!strokeInk) strokeInk = INKS[inkIdx++ % INKS.length].a;
+  if (!strokeInk) strokeInk = selectedInk || INKS[inkIdx++ % INKS.length].a;
   return [strokeInk[0] * scale, strokeInk[1] * scale, strokeInk[2] * scale];
 }
 
@@ -676,6 +732,47 @@ canvas.addEventListener("pointercancel", release);
 document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 document.addEventListener("gesturestart", (e) => e.preventDefault());
 document.addEventListener("dblclick", (e) => e.preventDefault());
+
+/* ---------------- 色パレット & ながすボタン ---------------- */
+// スウォッチの表示色は実際のにじみと同じ吸収モデルで計算（見た目と描画色のズレを防ぐ）
+function swatchCSS(a) {
+  const rgb = PAPER_RGB.map((p, i) => Math.round(p * Math.exp(-a[i] * 2.2) * 255));
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+}
+const paletteEl = document.getElementById("palette");
+PALETTE_INKS.forEach((def, i) => {
+  const b = document.createElement("button");
+  b.className = "sw" + (i === 0 ? " sel" : "");
+  b.setAttribute("aria-label", def.name);
+  if (def.a) {
+    b.style.background = swatchCSS(def.a);
+  } else {
+    // おまかせ: 固定色たちの円環グラデーション
+    const stops = PALETTE_INKS.slice(1).map((d, j, arr) =>
+      `${swatchCSS(d.a)} ${Math.round((j / arr.length) * 360)}deg`).join(", ");
+    b.style.background = `conic-gradient(${stops})`;
+  }
+  b.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    lastTouchAt = Date.now();          // パレット操作中に自動演出を始めない
+    selectedInk = def.a;
+    strokeInk = null;
+    paletteEl.querySelectorAll(".sw").forEach((el) => el.classList.remove("sel"));
+    b.classList.add("sel");
+    plip();
+    // 選んだ色がすぐ見える: 画面中央やや上に小さな墨滴を落とす
+    inkDrop(innerWidth / 2, innerHeight * 0.4, false);
+  });
+  paletteEl.appendChild(b);
+});
+
+const washBtn = document.getElementById("washBtn");
+washBtn.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); e.stopPropagation();
+  lastTouchAt = Date.now();
+  washFramesLeft = 110;                // 3本指ホールドと同じ「洗い流し」演出
+  plip();
+});
 
 /* ---------------- 自動演出: ゆるやかな筆運び ---------------- */
 // URL に ?demo を付けると即時開始（スクリーンショット検証用）
@@ -759,7 +856,7 @@ function updateGhost(dt) {
       speed: 0.06 + Math.random() * 0.10,
       turn: (Math.random() - 0.5) * 2.4,
       ttl: 2.5 + Math.random() * 3.5,
-      ink: INKS[inkIdx++ % INKS.length].a,
+      ink: selectedInk || INKS[inkIdx++ % INKS.length].a,
     };
   }
   ghost.angle += ghost.turn * dt;
