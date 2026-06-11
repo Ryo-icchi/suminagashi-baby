@@ -25,55 +25,76 @@
   }
   canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
 
-  /* ---- 色パレット & ながすボタン（1歳児向け: 大きい・壊れない・押すと必ず何か起きる） ---- */
+  /* ---- UI（1歳児向け: 普段は小さなボタン2つだけ・キャンバスを邪魔しない） ----
+     左下🎨=パレット開閉（色を選ぶと自動で閉じる）/ 右下🌊=洗い流す。
+     パレットは🎨の上に縦に並べて開く: 幅に依存しないので iPhone でも被らない */
+  .fab {
+    position: fixed;
+    width: 54px; height: 54px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.55);
+    background: rgba(241, 235, 222, 0.82);
+    box-shadow: 0 2px 14px rgba(60, 50, 30, 0.22);
+    font-size: 26px; line-height: 1;
+    padding: 0;
+    touch-action: none;
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  }
+  .fab:active { transform: scale(0.92); }
+  #palBtn {
+    left: calc(14px + env(safe-area-inset-left, 0px));
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+  #washBtn {
+    right: calc(14px + env(safe-area-inset-right, 0px));
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
   #palette {
     position: fixed;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    gap: 12px;
-    padding: 10px 14px;
-    background: rgba(241, 235, 222, 0.78);
+    left: calc(14px + env(safe-area-inset-left, 0px));
+    bottom: calc(78px + env(safe-area-inset-bottom, 0px));  /* 🎨ボタンの真上 */
+    display: none;
+    flex-direction: column-reverse;  /* おまかせが一番下（🎨に近い）*/
+    gap: 10px;
+    padding: 10px;
+    background: rgba(241, 235, 222, 0.82);
     border-radius: 999px;
-    box-shadow: 0 2px 14px rgba(60, 50, 30, 0.20);
+    box-shadow: 0 2px 14px rgba(60, 50, 30, 0.22);
     -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
     touch-action: none;
+    max-height: calc(100vh - 110px);
+    overflow: hidden;
   }
+  #palette.open { display: flex; }
+  #palette { flex-wrap: wrap; }  /* 背が低い端末では2列目に折り返す（はみ出し切れ防止） */
   .sw {
-    width: 52px; height: 52px;
+    width: 46px; height: 46px;
     border-radius: 50%;
     border: 3px solid rgba(255, 255, 255, 0.55);
     box-shadow: 0 1px 4px rgba(60, 50, 30, 0.25);
     padding: 0;
+    flex: none;
     transition: transform 0.15s ease, border-color 0.15s ease;
   }
   .sw.sel {
     border-color: #6b5d49;
-    transform: scale(1.15);
+    transform: scale(1.12);
   }
-  #washBtn {
-    position: fixed;
-    right: calc(14px + env(safe-area-inset-right, 0px));
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
-    width: 62px; height: 62px;
-    border-radius: 50%;
-    border: 3px solid rgba(255, 255, 255, 0.55);
-    background: rgba(241, 235, 222, 0.78);
-    box-shadow: 0 2px 14px rgba(60, 50, 30, 0.20);
-    font-size: 30px; line-height: 1;
-    touch-action: none;
+  /* 背が低い端末（横持ちiPhone等）は縦一列が入らないのでスウォッチを縮める */
+  @media (max-height: 480px) {
+    .sw { width: 36px; height: 36px; }
+    #palette { gap: 7px; padding: 8px; }
   }
-  #washBtn:active { transform: scale(0.92); }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="palette"></div>
-<button id="washBtn" aria-label="ながす">🌊</button>
+<button id="palBtn" class="fab" aria-label="いろをえらぶ">🎨</button>
+<button id="washBtn" class="fab" aria-label="ながす">🌊</button>
 <script>
 "use strict";
-console.log("SUMI build: v3.3-ink-rate");
+console.log("SUMI build: v3.4-mobile-ui");
 window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" + line); };
 
 /* ============================================================
@@ -89,8 +110,8 @@ window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" +
  * 操作（説明不要設計）:
  *   タッチ      → 墨滴がぽとりと落ちて、ゆっくりにじむ
  *   なぞる      → 墨が流れる
- *   下のパレット → 色を選ぶ（おまかせ=自動切替）。選ぶと中央に試し滴
- *   🌊ボタン    → 洗い流してリセット（3本指ホールドと同じ）
+ *   左下🎨      → パレット開閉。色を選ぶと自動で閉じて中央に試し滴
+ *   右下🌊      → 洗い流してリセット（3本指ホールドと同じ）
  *   12秒放置    → 自動演出（ゆるやかな筆運びが勝手に始まる）
  *   3本指ホールド→ 洗い流す（親用）
  * ============================================================ */
@@ -760,6 +781,7 @@ function swatchCSS(a) {
   return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
 }
 const paletteEl = document.getElementById("palette");
+const palBtn = document.getElementById("palBtn");
 PALETTE_INKS.forEach((def, i) => {
   const b = document.createElement("button");
   b.className = "sw" + (i === 0 ? " sel" : "");
@@ -780,19 +802,31 @@ PALETTE_INKS.forEach((def, i) => {
     paletteEl.querySelectorAll(".sw").forEach((el) => el.classList.remove("sel"));
     b.classList.add("sel");
     plip();
+    paletteEl.classList.remove("open");  // 選んだら自動で閉じてキャンバスに戻す
     // 選んだ色がすぐ見える: 画面中央やや上に小さな墨滴を落とす
     inkDrop(innerWidth / 2, innerHeight * 0.4, false);
   });
   paletteEl.appendChild(b);
 });
 
+palBtn.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); e.stopPropagation();
+  lastTouchAt = Date.now();
+  paletteEl.classList.toggle("open");
+  plip();
+});
+
 const washBtn = document.getElementById("washBtn");
 washBtn.addEventListener("pointerdown", (e) => {
   e.preventDefault(); e.stopPropagation();
   lastTouchAt = Date.now();
+  paletteEl.classList.remove("open");
   washFramesLeft = 110;                // 3本指ホールドと同じ「洗い流し」演出
   plip();
 });
+
+// キャンバスで遊び始めたらパレットは引っ込める
+canvas.addEventListener("pointerdown", () => paletteEl.classList.remove("open"));
 
 /* ---------------- 自動演出: ゆるやかな筆運び ---------------- */
 // URL に ?demo を付けると即時開始（スクリーンショット検証用）
@@ -825,6 +859,9 @@ function probeCanvas(label) {
   gl.readPixels(Math.floor(gl.drawingBufferWidth / 2), Math.floor(gl.drawingBufferHeight / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
   console.log("SUMI canvas " + label + ": " + Array.from(px).join(","));
 }
+
+// 検証用: ?pal でパレットを開いた状態にする（headless スクリーンショットでのUI確認用）
+if (location.search.includes("pal")) paletteEl.classList.add("open");
 
 // 検証用シード: 初回ペイント前に数ストローク分を物理ステップ込みで合成描画する。
 // headless Chrome は初回ペイント直後を撮るため、タイマー依存だと墨が写らない。
