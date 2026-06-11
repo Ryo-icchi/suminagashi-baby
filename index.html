@@ -73,7 +73,7 @@
 <button id="washBtn" aria-label="ながす">🌊</button>
 <script>
 "use strict";
-console.log("SUMI build: v3.2-ink-budget");
+console.log("SUMI build: v3.3-ink-rate");
 window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" + line); };
 
 /* ============================================================
@@ -101,8 +101,11 @@ const canvas = document.getElementById("c");
 const config = {
   SIM_RESOLUTION: 128,        // 速度場の解像度
   DYE_RESOLUTION: 768,        // 墨の解像度
-  DENSITY_DISSIPATION: 0.10,  // 墨の消えにくさ（小さいほど残る）
-  MAX_DYE: 1.15,              // 墨密度の上限。重ね打ちしても exp(-2.6*1.15)≈5% で和紙の質感が残る
+  DENSITY_DISSIPATION: 0.22,  // 墨の消えにくさ（小さいほど残る）。古い墨が30-60秒で薄れ画面が回復する
+  MAX_DYE: 1.0,               // 墨密度の上限。重ね打ちしても exp(-2.6)≈7% で和紙の質感が残る
+  STROKE_INK_DIST: 0.035,     // なぞりで墨を注入する最小移動距離（テクスチャ座標）。
+                              // pointermove は秒間60-120回発火するため、イベント毎注入だと
+                              // 「量×頻度」で経路が即飽和する（2026-06-11 Ryo FB 2回目で判明）
   VELOCITY_DISSIPATION: 0.55, // 流れの減衰（強い流れは早めに収まり墨が定着する）
   PRESSURE: 0.8,
   PRESSURE_ITERATIONS: 20,
@@ -640,9 +643,9 @@ function texCoord(clientX, clientY) {
 // 墨滴: 中心に墨 + 外向きの弱い流れ（ゆっくり咲くように広がる）
 function inkDrop(clientX, clientY, big) {
   const [x, y] = texCoord(clientX, clientY);
-  // 0.6/0.4 では数タップで画面が真っ黒になる（Ryo実機FB 2026-06-11）。
-  // 0.26 は1滴が薄すぎ（視覚検証）→ 0.34。連打の黒化は MAX_DYE クランプが防ぐ
-  const ink = nextInk(big ? 0.34 : 0.18);
+  // Ryo実機FB 2026-06-11 ×2「まだ多い・長く遊べるように」: 0.6→0.34→0.20。
+  // 1滴は薄めに出る → にじみ広がりで存在感が出る。連打の黒化は MAX_DYE クランプが防ぐ
+  const ink = nextInk(big ? 0.20 : 0.12);
   splat(x, y, 0, 0, ink, big ? 4.5 : 2.5);
   // 外向きのごく弱い流れ（強くすると墨が霧散して消える・2026-06-11 プローブで実証）
   const n = 6;
@@ -658,16 +661,23 @@ function inkDrop(clientX, clientY, big) {
   }
 }
 
-// なぞり: 移動方向に流れ + 細い墨の筋
+// なぞり: 移動方向に流れ（毎イベント・操作感の維持）+ 墨は移動距離ベースで間引いて注入
+let strokeDistAcc = 0;  // 前回の墨注入からの累積移動距離（テクスチャ座標）
 function inkStroke(clientX, clientY, dxPx, dyPx) {
   const [x, y] = texCoord(clientX, clientY);
   // 速すぎるスワイプでも墨が吹き飛ばないよう流速をクランプ
   const clamp = (v) => Math.max(-120, Math.min(120, v));
   const dx = clamp((dxPx / innerWidth) * config.SPLAT_FORCE);
   const dy = clamp((-dyPx / innerHeight) * config.SPLAT_FORCE);
-  // 0.30 だと pointermove の連射（数十回/秒）で経路が即座に真っ黒になる
-  const ink = nextInkSameColor(0.12);
-  splat(x, y, dx, dy, ink, 1.0);
+  // 流れはイベント毎に注入（既にある墨を「動かす」のは無料 = 黒くならない）
+  splatVelocityOnly(x, y, dx, dy, 1.0);
+  // 墨は距離スロットリング。イベント毎だと量×頻度（60-120Hz）で経路が即飽和する
+  strokeDistAcc += Math.hypot(dxPx / innerWidth, dyPx / innerHeight);
+  if (strokeDistAcc >= config.STROKE_INK_DIST) {
+    strokeDistAcc = 0;
+    const ink = nextInkSameColor(0.10);
+    splat(x, y, dx, dy, ink, 0.9);
+  }
 }
 
 // なぞり中は色を切り替えない（1ストローク1色）
@@ -733,6 +743,7 @@ canvas.addEventListener("pointermove", (e) => {
 function release(e) {
   pointers.delete(e.pointerId);
   strokeInk = null;
+  strokeDistAcc = 0;
   if (washTimer && pointers.size !== 3) { clearTimeout(washTimer); washTimer = null; }
 }
 canvas.addEventListener("pointerup", release);
@@ -797,6 +808,17 @@ function probeTex(label, fbo, u, v) {
     console.log("SUMI probe " + label + ": " + Array.from(px).map((x) => x.toFixed(3)).join(","));
   } catch (e) { console.log("SUMI probe " + label + " failed: " + e.message); }
 }
+function probeTexMean(label) {
+  try {
+    const w = dye.read.width, h = dye.read.height;
+    const buf = new Float32Array(w * h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dye.read.fbo);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, buf);
+    let sum = 0;
+    for (let i = 0; i < w * h; i++) sum += Math.max(buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2]);
+    console.log("SUMI probe " + label + ": " + (sum / (w * h)).toFixed(4));
+  } catch (e) { console.log("SUMI probe " + label + " failed: " + e.message); }
+}
 function probeCanvas(label) {
   const px = new Uint8Array(4);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -831,6 +853,21 @@ function seedDemo() {
   // --- 飽和ガード検証: 同一点に20連打しても MAX_DYE を超えない（真っ黒防止） ---
   for (let i = 0; i < 20; i++) inkDrop(innerWidth * 0.3, innerHeight * 0.3, true);
   probeTex("dye-after-20taps", dye.read, 0.3, 0.7);
+  // --- 長時間遊びシミュレーション（軽量版・SwiftShaderで完走できる規模） ---
+  // なぞり10秒相当（60Hz pointermove×600・dtは6倍で時間圧縮）+ タップ10回 + 放置回復。
+  // 平均墨密度（被覆率の代理）が「画面が真っ黒」(>0.8) に届かないことを機械検証
+  strokeDistAcc = 0; strokeInk = null;
+  for (let f = 0; f < 600; f++) {
+    const t = f / 600;
+    const px2 = innerWidth * (0.1 + 0.8 * Math.abs((t * 7) % 2 - 1));
+    const py2 = innerHeight * (0.1 + 0.8 * Math.abs((t * 3) % 2 - 1));
+    inkStroke(px2, py2, 8, 5);
+    if (f % 60 === 0) inkDrop(innerWidth * (0.2 + 0.6 * ((f * 0.0062) % 1)), innerHeight * (0.2 + 0.6 * ((f * 0.0101) % 1)), true);
+    step(1 / 10);  // dt を6倍にして消散・移流の実時間60秒分を圧縮
+  }
+  probeTexMean("mean-dye-after-play");
+  for (let i = 0; i < 100; i++) step(1 / 10);  // 操作をやめて実時間10秒分: 回復するか
+  probeTexMean("mean-dye-after-rest");
   // --- ここから通常のシードストローク ---
   for (let s = 0; s < 4; s++) {
     let x = 0.2 + Math.random() * 0.6;
@@ -882,7 +919,7 @@ function updateGhost(dt) {
     ghost = null;
     return;
   }
-  const ink = [ghost.ink[0] * 0.10, ghost.ink[1] * 0.10, ghost.ink[2] * 0.10];
+  const ink = [ghost.ink[0] * 0.05, ghost.ink[1] * 0.05, ghost.ink[2] * 0.05];
   splat(ghost.x, ghost.y, vx * config.SPLAT_FORCE * 0.25, vy * config.SPLAT_FORCE * 0.25, ink, 1.2);
 }
 

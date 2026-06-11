@@ -23,7 +23,7 @@ TS=$(date +%s)
   "http://localhost:8765/index.html?demo&v=$TS" 2>/tmp/sumi_console.log &
 CPID=$!
 # screenshot 出力を最大30秒待ち、Chrome居残りは kill（前回ハング対策）
-for i in $(seq 30); do [ -f /tmp/sumi_shot.png ] && break; sleep 1; done
+for i in $(seq 90); do [ -f /tmp/sumi_shot.png ] && break; sleep 1; done
 sleep 2
 kill $CPID 2>/dev/null || true
 
