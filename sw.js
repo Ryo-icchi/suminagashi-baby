@@ -1,5 +1,5 @@
 // すみながし Service Worker — オフラインでも遊べるように全アセットをキャッシュ
-const CACHE = "suminagashi-v1";
+const CACHE = "suminagashi-v2";
 const ASSETS = [
   "./",
   "./index.html",
