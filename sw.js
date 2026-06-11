@@ -1,6 +1,6 @@
 // すみながし Service Worker — オフラインでも遊べるように全アセットをキャッシュ
 // HTML はネットワーク優先（更新が1回の起動で届く）・静的アセットはキャッシュ優先
-const CACHE = "suminagashi-v5";
+const CACHE = "suminagashi-v6";
 const ASSETS = [
   "./",
   "./index.html",

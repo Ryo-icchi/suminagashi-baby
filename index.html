@@ -73,7 +73,7 @@
 <button id="washBtn" aria-label="ながす">🌊</button>
 <script>
 "use strict";
-console.log("SUMI build: v3.1-color-ui");
+console.log("SUMI build: v3.2-ink-budget");
 window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" + line); };
 
 /* ============================================================
@@ -101,7 +101,8 @@ const canvas = document.getElementById("c");
 const config = {
   SIM_RESOLUTION: 128,        // 速度場の解像度
   DYE_RESOLUTION: 768,        // 墨の解像度
-  DENSITY_DISSIPATION: 0.06,  // 墨の消えにくさ（小さいほど残る）
+  DENSITY_DISSIPATION: 0.10,  // 墨の消えにくさ（小さいほど残る）
+  MAX_DYE: 1.15,              // 墨密度の上限。重ね打ちしても exp(-2.6*1.15)≈5% で和紙の質感が残る
   VELOCITY_DISSIPATION: 0.55, // 流れの減衰（強い流れは早めに収まり墨が定着する）
   PRESSURE: 0.8,
   PRESSURE_ITERATIONS: 20,
@@ -252,12 +253,14 @@ const splatShader = compileShader(gl.FRAGMENT_SHADER, `
   uniform vec3 color;
   uniform vec2 point;
   uniform float radius;
+  uniform float clampMax;
   void main () {
     vec2 p = vUv - point.xy;
     p.x *= aspectRatio;
     vec3 splat = exp(-dot(p, p) / radius) * color;
     vec3 base = texture2D(uTarget, vUv).xyz;
-    gl_FragColor = vec4(base + splat, 1.0);
+    // 墨パスでは上限あり（重ね打ちで真っ黒に飽和しない）。速度パスは clampMax=1e6 で実質無効
+    gl_FragColor = vec4(min(base + splat, vec3(clampMax)), 1.0);
   }
 `);
 
@@ -606,11 +609,13 @@ function splat(x, y, dx, dy, color, radiusScale) {
   gl.uniform2f(programs.splat.uniforms.point, x, y);
   gl.uniform3f(programs.splat.uniforms.color, dx, dy, 0);
   gl.uniform1f(programs.splat.uniforms.radius, correctRadius(config.SPLAT_RADIUS * (radiusScale || 1)));
+  gl.uniform1f(programs.splat.uniforms.clampMax, 1e6);  // 速度は無制限
   blit(velocity.write);
   velocity.swap();
 
   gl.uniform1i(programs.splat.uniforms.uTarget, dye.read.attach(0));
   gl.uniform3f(programs.splat.uniforms.color, color[0], color[1], color[2]);
+  gl.uniform1f(programs.splat.uniforms.clampMax, config.MAX_DYE);  // 墨は上限あり
   blit(dye.write);
   dye.swap();
 }
@@ -622,6 +627,7 @@ function splatVelocityOnly(x, y, dx, dy, radiusScale) {
   gl.uniform2f(programs.splat.uniforms.point, x, y);
   gl.uniform3f(programs.splat.uniforms.color, dx, dy, 0);
   gl.uniform1f(programs.splat.uniforms.radius, correctRadius(config.SPLAT_RADIUS * (radiusScale || 1)));
+  gl.uniform1f(programs.splat.uniforms.clampMax, 1e6);
   blit(velocity.write);
   velocity.swap();
 }
@@ -634,7 +640,9 @@ function texCoord(clientX, clientY) {
 // 墨滴: 中心に墨 + 外向きの弱い流れ（ゆっくり咲くように広がる）
 function inkDrop(clientX, clientY, big) {
   const [x, y] = texCoord(clientX, clientY);
-  const ink = nextInk(big ? 0.6 : 0.4);
+  // 0.6/0.4 では数タップで画面が真っ黒になる（Ryo実機FB 2026-06-11）。
+  // 0.26 は1滴が薄すぎ（視覚検証）→ 0.34。連打の黒化は MAX_DYE クランプが防ぐ
+  const ink = nextInk(big ? 0.34 : 0.18);
   splat(x, y, 0, 0, ink, big ? 4.5 : 2.5);
   // 外向きのごく弱い流れ（強くすると墨が霧散して消える・2026-06-11 プローブで実証）
   const n = 6;
@@ -657,7 +665,8 @@ function inkStroke(clientX, clientY, dxPx, dyPx) {
   const clamp = (v) => Math.max(-120, Math.min(120, v));
   const dx = clamp((dxPx / innerWidth) * config.SPLAT_FORCE);
   const dy = clamp((-dyPx / innerHeight) * config.SPLAT_FORCE);
-  const ink = nextInkSameColor(0.30);
+  // 0.30 だと pointermove の連射（数十回/秒）で経路が即座に真っ黒になる
+  const ink = nextInkSameColor(0.12);
   splat(x, y, dx, dy, ink, 1.0);
 }
 
@@ -819,6 +828,9 @@ function seedDemo() {
   probeTex("dye-at-drop", dye.read, 0.7, 0.4);
   for (let i = 0; i < 60; i++) step(1 / 60);
   probeTex("dye-at-drop-after60", dye.read, 0.7, 0.4);
+  // --- 飽和ガード検証: 同一点に20連打しても MAX_DYE を超えない（真っ黒防止） ---
+  for (let i = 0; i < 20; i++) inkDrop(innerWidth * 0.3, innerHeight * 0.3, true);
+  probeTex("dye-after-20taps", dye.read, 0.3, 0.7);
   // --- ここから通常のシードストローク ---
   for (let s = 0; s < 4; s++) {
     let x = 0.2 + Math.random() * 0.6;
@@ -870,7 +882,7 @@ function updateGhost(dt) {
     ghost = null;
     return;
   }
-  const ink = [ghost.ink[0] * 0.22, ghost.ink[1] * 0.22, ghost.ink[2] * 0.22];
+  const ink = [ghost.ink[0] * 0.10, ghost.ink[1] * 0.10, ghost.ink[2] * 0.10];
   splat(ghost.x, ghost.y, vx * config.SPLAT_FORCE * 0.25, vy * config.SPLAT_FORCE * 0.25, ink, 1.2);
 }
 
