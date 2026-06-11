@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>すみながし</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<!-- iOS PWA（ホーム画面追加でフルスクリーン起動） -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="すみながし">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #f3ecdf;
+    /* 1歳児対策: スクロール・ズーム・長押し選択・コールアウトを全て無効化 */
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    overscroll-behavior: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+/* ============================================================
+ * すみながし（1歳児向け）
+ * - タッチ → 同心円の墨滴が落ちる（必ずきれいなことが起きる）
+ * - なぞる → 墨が流れる（mathematical marbling の変形式）
+ * - ボタンなし。誤操作で壊れる要素なし
+ * - 3本指 1.2秒ホールド → 洗い流す（親用ジェスチャ）
+ * - 12秒さわらないと自動演出（子供の注意を引く）
+ * ============================================================ */
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+const PAPER = "#f3ecdf";                       // 和紙の色
+const PALETTE = [
+  "#1f1f1f",  // 墨
+  "#2e4d8e",  // 藍
+  "#c43c2e",  // 朱
+  "#3f6b4f",  // 松葉
+  "#c9981f",  // 山吹
+  "#7b4a8f",  // 菖蒲
+];
+
+const MAX_DROPS = 70;        // これを超えたら古い滴から消す（自動で画面が回り続ける）
+const DROP_VERTS = 64;       // 新規滴の頂点数
+const MAX_VERTS = 900;       // 1滴あたり頂点上限（性能ガード）
+const MAX_SEG = 7;           // 頂点間がこれ以上伸びたら中点挿入
+const STIR_LAMBDA = 70;      // なぞり変形の影響半径
+const IDLE_MS = 12000;       // 自動演出までの無操作時間
+
+let drops = [];              // {color, pts:[x0,y0,x1,y1,...]}
+let dirty = true;
+let colorIdx = 0;
+let lastTouchAt = Date.now();
+let washing = false;
+
+/* ---------- キャンバスサイズ（Retina対応） ---------- */
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(innerWidth * dpr);
+  canvas.height = Math.round(innerHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  dirty = true;
+}
+addEventListener("resize", resize);
+resize();
+
+/* ---------- マーブリング物理 ---------- */
+
+// 滴を落とす: 既存の全頂点を外側へ押し出す  P' = C + (P-C)·√(1 + r²/|P-C|²)
+function spawnDrop(cx, cy, r, color) {
+  const r2 = r * r;
+  for (const d of drops) {
+    const p = d.pts;
+    for (let i = 0; i < p.length; i += 2) {
+      const dx = p[i] - cx, dy = p[i + 1] - cy;
+      const dist2 = Math.max(dx * dx + dy * dy, 0.01);
+      const s = Math.sqrt(1 + r2 / dist2);
+      p[i] = cx + dx * s;
+      p[i + 1] = cy + dy * s;
+    }
+  }
+  const pts = new Array(DROP_VERTS * 2);
+  for (let i = 0; i < DROP_VERTS; i++) {
+    const a = (i / DROP_VERTS) * Math.PI * 2;
+    pts[i * 2] = cx + r * Math.cos(a);
+    pts[i * 2 + 1] = cy + r * Math.sin(a);
+  }
+  drops.push({ color, pts });
+  if (drops.length > MAX_DROPS) drops.shift();
+  dirty = true;
+}
+
+// 指でなぞる: 指の近くの頂点を移動方向へ引きずる（距離減衰）
+function stir(fx, fy, ux, uy, z) {
+  for (const d of drops) {
+    const p = d.pts;
+    for (let i = 0; i < p.length; i += 2) {
+      const dx = p[i] - fx, dy = p[i + 1] - fy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const f = z * STIR_LAMBDA / (STIR_LAMBDA + dist);
+      p[i] += ux * f;
+      p[i + 1] += uy * f;
+    }
+    resample(d);
+  }
+  dirty = true;
+}
+
+// 伸びた辺に中点を挿入して輪郭を滑らかに保つ
+function resample(d) {
+  const p = d.pts;
+  const n = p.length;
+  if (n >= MAX_VERTS * 2) return;
+  const out = [];
+  const maxSeg2 = MAX_SEG * MAX_SEG;
+  for (let i = 0; i < n; i += 2) {
+    const x0 = p[i], y0 = p[i + 1];
+    const j = (i + 2) % n;
+    const x1 = p[j], y1 = p[j + 1];
+    out.push(x0, y0);
+    const dx = x1 - x0, dy = y1 - y0;
+    if (dx * dx + dy * dy > maxSeg2 && out.length < MAX_VERTS * 2) {
+      out.push((x0 + x1) / 2, (y0 + y1) / 2);
+    }
+  }
+  d.pts = out;
+}
+
+/* ---------- タップ演出: 同心リング（色→和紙色→次の色） ---------- */
+function tapRings(x, y) {
+  const c1 = PALETTE[colorIdx % PALETTE.length];
+  const c2 = PALETTE[(colorIdx + 1) % PALETTE.length];
+  colorIdx++;
+  const base = 30 + Math.random() * 30;
+  spawnDrop(x, y, base, c1);
+  spawnDrop(x, y, base * 0.65, PAPER);  // 和紙色の滴 → リングが生まれる
+  spawnDrop(x, y, base * 0.35, c2);
+}
+
+/* ---------- 描画 ---------- */
+function render() {
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0, 0, innerWidth, innerHeight);
+  for (const d of drops) {
+    const p = d.pts;
+    ctx.beginPath();
+    ctx.moveTo(p[0], p[1]);
+    for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
+    ctx.closePath();
+    ctx.fillStyle = d.color;
+    ctx.fill();
+  }
+}
+
+function loop() {
+  if (dirty && !washing) { render(); dirty = false; }
+  autoDemo();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* ---------- 洗い流す（フェードアニメーション） ---------- */
+function washAway() {
+  if (washing) return;
+  washing = true;
+  const t0 = performance.now();
+  const DUR = 700;
+  (function step(now) {
+    const t = Math.min((now - t0) / DUR, 1);
+    render();
+    ctx.fillStyle = PAPER;
+    ctx.globalAlpha = t;
+    ctx.fillRect(0, 0, innerWidth, innerHeight);
+    ctx.globalAlpha = 1;
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      drops = [];
+      washing = false;
+      dirty = true;
+    }
+  })(t0);
+}
+
+/* ---------- やさしい効果音（タップ時のぽちゃん） ---------- */
+let audio = null;
+const PENTA = [523.25, 587.33, 659.25, 783.99, 880.0];
+function plip() {
+  try {
+    if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === "suspended") audio.resume();
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    const f = PENTA[Math.floor(Math.random() * PENTA.length)] * (Math.random() < 0.3 ? 0.5 : 1);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(f * 1.4, audio.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(f, audio.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.001, audio.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.10, audio.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.45);
+    osc.connect(gain).connect(audio.destination);
+    osc.start();
+    osc.stop(audio.currentTime + 0.5);
+  } catch (e) { /* 音が出なくても遊べる */ }
+}
+
+/* ---------- タッチ入力（マルチタッチ対応） ---------- */
+const pointers = new Map();   // pointerId -> {x, y, travel}
+let washTimer = null;
+
+canvas.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  lastTouchAt = Date.now();
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, travel: 0 });
+  tapRings(e.clientX, e.clientY);
+  plip();
+  // 親用: 3本指 1.2秒ホールドで洗い流す
+  if (pointers.size === 3) {
+    washTimer = setTimeout(() => { if (pointers.size === 3) washAway(); }, 1200);
+  } else if (washTimer) {
+    clearTimeout(washTimer); washTimer = null;
+  }
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  const pt = pointers.get(e.pointerId);
+  if (!pt) return;
+  e.preventDefault();
+  lastTouchAt = Date.now();
+  const dx = e.clientX - pt.x, dy = e.clientY - pt.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 1.5) return;
+  const z = Math.min(dist, 18);            // 1イベントあたりの変形強度上限
+  stir(e.clientX, e.clientY, dx / dist, dy / dist, z);
+  // ゆっくりなぞると色の小滴が点々と落ちる
+  pt.travel += dist;
+  if (pt.travel > 90) {
+    pt.travel = 0;
+    spawnDrop(e.clientX, e.clientY, 8 + Math.random() * 8, PALETTE[colorIdx++ % PALETTE.length]);
+  }
+  pt.x = e.clientX; pt.y = e.clientY;
+});
+
+function release(e) {
+  pointers.delete(e.pointerId);
+  if (washTimer && pointers.size !== 3) { clearTimeout(washTimer); washTimer = null; }
+}
+canvas.addEventListener("pointerup", release);
+canvas.addEventListener("pointercancel", release);
+
+// iOS Safari の既定ジェスチャを完全停止
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+document.addEventListener("gesturestart", (e) => e.preventDefault());
+document.addEventListener("dblclick", (e) => e.preventDefault());
+
+/* ---------- 自動演出（無操作時に子供の注意を引く） ---------- */
+let lastDemoAt = 0;
+function autoDemo() {
+  const now = Date.now();
+  if (now - lastTouchAt < IDLE_MS || washing) return;
+  if (now - lastDemoAt < 1400) return;
+  lastDemoAt = now;
+  const x = innerWidth * (0.15 + Math.random() * 0.7);
+  const y = innerHeight * (0.15 + Math.random() * 0.7);
+  if (Math.random() < 0.65 || drops.length < 4) {
+    tapRings(x, y);
+  } else {
+    const a = Math.random() * Math.PI * 2;
+    stir(x, y, Math.cos(a), Math.sin(a), 14);
+  }
+}
+
+/* ---------- 画面を消灯させない（遊んでいる間） ---------- */
+async function keepAwake() {
+  try { await navigator.wakeLock.request("screen"); } catch (e) { /* 非対応でもOK */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") keepAwake();
+});
+keepAwake();
+
+/* ---------- Service Worker（オフライン動作） ---------- */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+
+/* ---------- 起動時のウェルカム演出 ---------- */
+setTimeout(() => { tapRings(innerWidth / 2, innerHeight / 2); }, 400);
+</script>
+</body>
+</html>
