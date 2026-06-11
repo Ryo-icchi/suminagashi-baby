@@ -1,5 +1,6 @@
 // すみながし Service Worker — オフラインでも遊べるように全アセットをキャッシュ
-const CACHE = "suminagashi-v3";
+// HTML はネットワーク優先（更新が1回の起動で届く）・静的アセットはキャッシュ優先
+const CACHE = "suminagashi-v4";
 const ASSETS = [
   "./",
   "./index.html",
@@ -23,18 +24,37 @@ self.addEventListener("activate", (e) => {
   );
 });
 
-// キャッシュ優先・なければネットワーク（取得できたらキャッシュに追加）
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
-  e.respondWith(
-    caches.match(e.request).then(
-      (hit) =>
-        hit ||
-        fetch(e.request).then((res) => {
+  const url = new URL(e.request.url);
+  const isHTML = e.request.mode === "navigate" ||
+                 url.pathname.endsWith("/") || url.pathname.endsWith("/index.html");
+
+  if (isHTML) {
+    // ネットワーク優先: オンラインなら常に最新。取れたらキャッシュ更新。オフライン時のみキャッシュ
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
           const copy = res.clone();
           caches.open(CACHE).then((c) => c.put(e.request, copy));
           return res;
         })
-    )
-  );
+        .catch(() =>
+          caches.match(e.request).then((hit) => hit || caches.match("./index.html"))
+        )
+    );
+  } else {
+    // 静的アセット: キャッシュ優先・なければネットワーク（取得できたらキャッシュに追加）
+    e.respondWith(
+      caches.match(e.request).then(
+        (hit) =>
+          hit ||
+          fetch(e.request).then((res) => {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(e.request, copy));
+            return res;
+          })
+      )
+    );
+  }
 });
