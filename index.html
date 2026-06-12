@@ -149,7 +149,7 @@
 </div>
 <script>
 "use strict";
-console.log("SUMI build: v4.2-fine");
+console.log("SUMI build: v4.3-kirei");
 window.onerror = (msg, src, line) => { console.log("SUMI ERROR: " + msg + " @" + line); };
 
 /* ============================================================
@@ -177,7 +177,8 @@ const canvas = document.getElementById("c");
 const config = {
   SIM_RESOLUTION: 128,        // 速度場の解像度
   DYE_RESOLUTION: 768,        // 墨の解像度
-  DENSITY_DISSIPATION: 0.22,  // 墨の消えにくさ（小さいほど残る）。古い墨が30-60秒で薄れ画面が回復する
+  DENSITY_DISSIPATION: 0.35,  // 墨の消えにくさ（小さいほど残る）。約8-10秒で薄れて画面が回復する
+                              // （0.22→0.35: Ryo FB 4回目「まだ全然多い」。連打ペースに合わせ回転を速く）
   MAX_DYE: 1.0,               // 墨密度の上限。重ね打ちしても exp(-2.6)≈7% で和紙の質感が残る
   STROKE_INK_DIST: 0.035,     // なぞりで墨を注入する最小移動距離（テクスチャ座標）。
                               // pointermove は秒間60-120回発火するため、イベント毎注入だと
@@ -489,6 +490,8 @@ const displayShader = compileShader(gl.FRAGMENT_SHADER, `
   uniform sampler2D uTexture;
   uniform vec2 resolution;
   uniform vec3 paper;
+  uniform float mudCut;   // 濁り除去の強さ（はなやか 0.75 / しぶい 0.0）
+  uniform float dispMax;  // 表示濃度の上限（黒を数学的に出力不能にする）
   float hash (vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
   float vnoise (vec2 p) {
     vec2 i = floor(p), f = fract(p);
@@ -498,6 +501,12 @@ const displayShader = compileShader(gl.FRAGMENT_SHADER, `
   }
   void main () {
     vec3 dye = texture2D(uTexture, vUv).rgb;
+    // 綺麗さ優先の混色（2026-06-11 Ryo FB「どんどん黒くなって綺麗じゃない」）:
+    // 減算混色は補色の重なりで構造的に黒を生む。全チャンネル共通の吸収（=濁り成分）を
+    // 表示時に抜いて色相を保つ。シミュレーション自体は触らない（表示だけ綺麗化）
+    float mud = min(dye.r, min(dye.g, dye.b));
+    dye -= mudCut * mud;
+    dye = min(dye, vec3(dispMax));
     vec2 px = vUv * resolution;
     // 和紙: 低周波の繊維ムラ + 高周波の粒子
     float fiber = vnoise(px * 0.012) * 0.45 + vnoise(px * 0.05) * 0.35 + vnoise(px * 0.22) * 0.20;
@@ -710,6 +719,9 @@ function render() {
   gl.uniform1i(programs.display.uniforms.uTexture, dye.read.attach(0));
   gl.uniform2f(programs.display.uniforms.resolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
   gl.uniform3f(programs.display.uniforms.paper, PAPER_RGB[0], PAPER_RGB[1], PAPER_RGB[2]);
+  // しぶいモードは墨（ほぼ無彩色）が主役なので濁り除去をかけない（かけると墨が消える）
+  gl.uniform1f(programs.display.uniforms.mudCut, settings.mode === "vivid" ? 0.75 : 0.0);
+  gl.uniform1f(programs.display.uniforms.dispMax, 0.55);
   blit(null);
 }
 
@@ -764,7 +776,9 @@ function inkDrop(clientX, clientY, big, opt) {
   const [x, y] = texCoord(clientX, clientY);
   // Ryo実機FB 2026-06-11 ×2「まだ多い・長く遊べるように」: 0.6→0.34→0.20。
   // 1滴は薄めに出る → にじみ広がりで存在感が出る。連打の黒化は MAX_DYE クランプが防ぐ
-  const s = opt.scale != null ? opt.scale : (big ? 0.20 : 0.12);
+  // 注入量 0.12/0.07: Ryo FB 4回目（2026-06-11「まだ全然墨の量が多い」）。0.20 からさらに削減。
+  // ⚠️ これ以上増やす変更（係数・追加注入源含む）は禁止。inkBudgetCheck が回帰検知する
+  const s = opt.scale != null ? opt.scale : (big ? 0.12 : 0.07);
   const ink = [def.a[0] * s, def.a[1] * s, def.a[2] * s];
   // 滴半径 3.0/1.8（旧 4.5/2.5）: 参考サイトの繊細さに合わせて小ぶりに（2026-06-11 Ryo FB「細く」）
   splat(x, y, 0, 0, ink, opt.radius != null ? opt.radius : (big ? 3.0 : 1.8));
@@ -810,7 +824,7 @@ function inkStroke(clientX, clientY, dxPx, dyPx) {
     // ⚠️ 細い gaussian は水が荒いと数値拡散で消える（旧 VEL_DISS 0.55 + CURL 8 時代に
     //    radius 0.35 が1秒で消滅した実測あり）。水を静めた（VEL_DISS 1.8 / CURL 4 /
     //    なぞり速度場 0.35）うえで細くするのがセット。dye-stroke プローブが残存を監視
-    const ink = nextInkSameColor(0.14);
+    const ink = nextInkSameColor(0.10);  // 0.14→0.10（Ryo FB 4回目「まだ全然多い」）
     splat(x, y, dx, dy, ink, 0.40);
     // なぞりが旋律になる: Y位置の音高でごく小さく鳴らす（主張しすぎない音量）
     tone(pentaFreq(pitchFromY(clientY)), { type: "sine", decay: 0.18, gain: 0.028 });
@@ -988,7 +1002,7 @@ canvas.addEventListener("pointerdown", (e) => {
   // 手のひらペタン検出: 接触楕円が指よりずっと大きい → 特大の滴 + 低い「ぼちゃん」
   const palm = (e.width || 0) >= 36;
   const def = inkDrop(e.clientX, e.clientY, true,
-                      palm ? { scale: 0.30, radius: 7, ringScale: 1.7 } : null);
+                      palm ? { scale: 0.18, radius: 7, ringScale: 1.7 } : null);
   dropSound(def, e.clientY, palm);
   sayColor(def.name);
   fx.fishTarget(e.clientX, e.clientY);
@@ -1149,7 +1163,7 @@ const fx = (() => {
         ring(f.x, f.y, "rgba(110,130,150,0.9)", 1.5);
         splashNoise(true);
         const [u, v] = texCoord(f.x, f.y);
-        splat(u, v, 0, 0, [0.04, 0.04, 0.05], 3.0);  // 着水の薄い水紋を流体にも
+        splat(u, v, 0, 0, [0.08, 0.04, 0.01], 3.0);  // 着水の薄い水色の水紋（無彩色は濁り除去で消えるため色相を持たせる）
       }
       return;
     }
@@ -1566,8 +1580,9 @@ function seedDemo() {
             innerHeight * (0.1 + 0.8 * ((i * 0.61) % 1)), true);
     for (let k = 0; k < 3; k++) step(1 / 30);
   }
-  // baseline 0.26（2026-06-11 v4.2-fine 実測。v4.1 は 0.40）。0.45 超え = 注入量の実質増加 = 回帰
-  inkBudgetCheck("30taps", probeTexMean("mean-dye-after-30taps"), 0.45);
+  // baseline 0.14（2026-06-12 v4.3-kirei 実測。v4.2: 0.26 / v4.1: 0.40 — Ryo FB 4回で段階削減）。
+  // 0.20 超え = 注入量の実質増加 = 回帰（Ryo FB と逆行する変更を機械ブロック）
+  inkBudgetCheck("30taps", probeTexMean("mean-dye-after-30taps"), 0.20);
   // --- 長時間遊びシミュレーション（軽量版・SwiftShaderで完走できる規模） ---
   // なぞり10秒相当（60Hz pointermove×600・dtは6倍で時間圧縮）+ タップ10回 + 放置回復。
   // 平均墨密度（被覆率の代理）が「画面が真っ黒」(>0.8) に届かないことを機械検証
@@ -1622,6 +1637,12 @@ function seedVis() {
   for (let i = 0; i < 60; i++) step(1 / 60);
   inkDrop(innerWidth * 0.85, innerHeight * 0.65, true);
   for (let i = 0; i < 30; i++) step(1 / 60);
+  // 混色テスト: 赤+青+黄を同じ場所に重ねても黒く濁らないこと（綺麗さ優先の混色の視覚検証）
+  const inks = modeInks();
+  for (let k = 0; k < 3; k++) {
+    inkDrop(innerWidth * 0.30, innerHeight * 0.25, true, { def: inks[k] });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+  }
 }
 if (visMode) { seedVis(); console.log("SUMI: vis-seeded"); }
 else if (demoMode) { seedDemo(); console.log("SUMI: seeded"); }
