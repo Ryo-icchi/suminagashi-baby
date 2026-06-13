@@ -16,14 +16,14 @@ import zlib
 
 # ---------------- 色 ----------------
 PAPER = (0.953, 0.933, 0.886)         # 和紙の生成り
-WATER_BASE = (0.90, 0.915, 0.915)     # 水面（ごく淡い青みの生成り）
+WATER_BASE = (0.955, 0.945, 0.915)    # 水面（明るい生成り・線を主役に）
 
-# 墨流しのリング色（藍×生成り中心の上品な寒色＝暖色の金魚を引き立てる）
-INK_DEEP = (0.13, 0.24, 0.45)         # 濃藍
-INK_BLUE = (0.20, 0.42, 0.62)         # 藍
-INK_TEAL = (0.30, 0.58, 0.64)         # 青緑
-INK_AQUA = (0.56, 0.76, 0.78)         # 淡い水
-CREAM = (0.95, 0.94, 0.89)            # リング間の生成り
+# 墨流しのインク線の色（藍を主に・濃淡で奥行き）。線（筋）として細く描く
+INK_DEEP = (0.14, 0.26, 0.46)         # 濃藍
+INK_BLUE = (0.20, 0.40, 0.60)         # 藍
+INK_TEAL = (0.26, 0.52, 0.60)         # 青緑
+INK_AQUA = (0.42, 0.64, 0.70)         # 淡い藍
+CREAM = (0.955, 0.945, 0.915)         # （後方互換・未使用）
 
 # 金魚（水彩コーラル・黒も硬い縁取りも使わない）
 BODY_COL = (0.95, 0.45, 0.27)
@@ -35,7 +35,7 @@ EYE_COL = (0.32, 0.13, 0.11)
 FISH_C = (0.50, 0.51)
 FISH_ANGLE = -0.05
 FISH_SCALE = 0.60
-FEATHER = 0.060
+FEATHER = 0.042       # 輪郭をやや立てて小サイズ視認性を上げる（背景が賑やかなため）
 BODY_PARTS = [
     (0.04, 0.00, 0.300, 0.150, 0.0, 'body'),
     (0.20, 0.00, 0.115, 0.125, 0.0, 'body'),
@@ -82,7 +82,7 @@ def build_marble():
     返り値: [(color, [(x,y), ...]), ...]（古い順＝奥から手前へ）。座標は 0..1。"""
     drops = []  # (color, points)
 
-    def drop(cx, cy, r, color, n=160):
+    def drop(cx, cy, r, color, n=200):
         # 既存の全点を外側へ押し出す（面積保存: |p'-c| = sqrt(|p-c|^2 + r^2)）
         for _col, pts in drops:
             for i in range(len(pts)):
@@ -91,36 +91,53 @@ def build_marble():
                 d2 = dx * dx + dy * dy
                 f = math.sqrt(1.0 + r * r / d2) if d2 > 1e-12 else 1.0
                 pts[i] = (cx + dx * f, cy + dy * f)
-        # 新しい円を最前面に追加
-        ring = [(cx + r * math.cos(2 * math.pi * k / n),
-                 cy + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+        # 新しい円を最前面に追加（半径を低周波ノイズで揺らして有機的に＝真円にしない）
+        seed = len(drops) * 1.7
+        ring = []
+        for k in range(n):
+            a = 2 * math.pi * k / n
+            wob = (1.0 + 0.05 * math.sin(3 * a + seed) + 0.035 * math.sin(5 * a - seed * 0.7)
+                   + 0.025 * math.sin(8 * a + seed))
+            rr = r * wob
+            ring.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
         drops.append((color, ring))
 
-    def tine(ox, oy, ux, uy, z, lam):
-        """点を方向(ux,uy)へドラッグ。線(O・方向に直交)からの距離で減衰＝櫛の歯。"""
+    def comb(drag_axis, drag_amt, teeth_axis, t0, spacing, count, falloff):
+        """櫛: teeth_axis 方向に等間隔の歯。各点を drag_axis 方向へ、最寄りの歯から
+        の距離でガウス減衰させてドラッグ＝marbling のフェザー模様を作る。"""
+        teeth = [t0 + k * spacing for k in range(count)]
+        w = spacing * falloff
         for _col, pts in drops:
             for i in range(len(pts)):
                 px, py = pts[i]
-                d = abs((px - ox) * ux + (py - oy) * uy)
-                m = z * (lam ** d)
-                pts[i] = (px + ux * m, py + uy * m)
+                coord = px if teeth_axis == 'x' else py
+                dmin = min(abs(coord - t) for t in teeth)
+                disp = drag_amt * math.exp(-((dmin / w) ** 2))
+                if drag_axis == 'y':
+                    pts[i] = (px, py + disp)
+                else:
+                    pts[i] = (px + disp, py)
 
-    # --- 中央に細い同心円を交互に（藍×生成り）＝すみながしの繊細なさざ波 ---
-    cx, cy = 0.50, 0.49
-    cols = [INK_DEEP, CREAM, INK_BLUE, CREAM, INK_TEAL, CREAM,
-            INK_BLUE, CREAM, INK_TEAL, CREAM, INK_AQUA, CREAM, INK_BLUE]
-    r = 0.345
-    for i, col in enumerate(cols):
-        drop(cx, cy, r, col)
-        r -= 0.026          # リング幅を細く
-    # --- 脇に小さな滴で変化 ---
-    drop(0.27, 0.31, 0.045, INK_TEAL)
-    drop(0.74, 0.70, 0.040, INK_BLUE)
-    # --- 櫛で大きく流す（墨流し本来の流れる模様に） ---
-    tine(0.50, 0.27, 0.00,  0.16, 1.0, 0.020)    # 上半分を下へ大きく
-    tine(0.50, 0.73, 0.00, -0.16, 1.0, 0.020)    # 下半分を上へ
-    tine(0.28, 0.50, 0.14,  0.00, 1.0, 0.022)    # 左から右へ横の流れ
-    tine(0.74, 0.50, -0.10, 0.00, 1.0, 0.028)    # 右からの戻り
+    # --- 複数の中心に滴を落とす（面積保存で互いに押し合い、重なり合う不規則な
+    #     リング＝本物のすみながしの有機的な筋模様になる）。各リングは細線で描く ---
+    # 塗りの色帯（藍×生成りを交互に）で同心バンドを作り、櫛で流す＝本物のマーブル。
+    bands = [INK_DEEP, CREAM, INK_BLUE, CREAM, INK_TEAL, CREAM,
+             INK_BLUE, CREAM, INK_AQUA, CREAM, INK_DEEP, CREAM]
+    # 主中心: 大きめの同心バンドでキャンバスを満たす
+    r = 0.40
+    for col in bands:
+        drop(0.50, 0.49, r, col)
+        r -= 0.032
+    # 副中心で有機的に重ねる
+    drop(0.30, 0.35, 0.10, INK_BLUE)
+    drop(0.30, 0.35, 0.065, CREAM)
+    drop(0.72, 0.66, 0.10, INK_TEAL)
+    drop(0.72, 0.66, 0.065, CREAM)
+    # --- 櫛（comb）で大きくドラッグして同心円を崩す＝marbling のフェザー模様 ---
+    comb('y',  0.085, 'x', 0.10, 0.20, 5, 0.45)   # 縦に引く櫛（歯は横並び）
+    comb('y', -0.085, 'x', 0.20, 0.20, 5, 0.45)   # 逆向きでフェザーに
+    comb('x',  0.085, 'y', 0.10, 0.20, 5, 0.45)   # 横に引く櫛（直交）
+    comb('x', -0.060, 'y', 0.22, 0.22, 5, 0.45)   # 戻し
     return drops
 
 
@@ -151,6 +168,73 @@ def fill_poly(buf, N, pts, color):
             for _x in range(xa, xb + 1):
                 buf[idx] = cr; buf[idx + 1] = cg; buf[idx + 2] = cb
                 idx += 3
+
+
+def _stamp(buf, N, cx, cy, rad, color):
+    """中心(cx,cy)に半径radの円を置く（線スタンプ用）。"""
+    x0 = max(0, int(cx - rad)); x1 = min(N - 1, int(cx + rad))
+    y0 = max(0, int(cy - rad)); y1 = min(N - 1, int(cy + rad))
+    r2 = rad * rad
+    cr, cg, cb = color
+    for y in range(y0, y1 + 1):
+        dy = y + 0.5 - cy
+        base = y * N
+        for x in range(x0, x1 + 1):
+            dx = x + 0.5 - cx
+            if dx * dx + dy * dy <= r2:
+                idx = (base + x) * 3
+                buf[idx] = cr; buf[idx + 1] = cg; buf[idx + 2] = cb
+
+
+def stroke_poly(buf, N, pts, color, width):
+    """多角形の輪郭を太さ width の線で描く（墨流しのインクの筋）。pts は 0..1。"""
+    w = max(0.6, width / 2.0)
+    P = [(x * N, y * N) for (x, y) in pts]
+    n = len(P)
+    for i in range(n):
+        x1, y1 = P[i]
+        x2, y2 = P[(i + 1) % n]
+        seg = math.hypot(x2 - x1, y2 - y1)
+        steps = max(1, int(seg / (w * 0.7)))
+        for s in range(steps + 1):
+            t = s / steps
+            _stamp(buf, N, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, w, color)
+
+
+def box_blur(buf, N, rad, passes=2):
+    """分離型ボックスぼかし（インクのにじみ＝柔らかい縁を作る）。端はクランプ。"""
+    if rad < 1:
+        return buf
+    w = 2 * rad + 1
+    src = buf
+    for _ in range(passes):
+        # 横方向
+        dst = [0.0] * len(src)
+        for y in range(N):
+            base = y * N * 3
+            for ch in range(3):
+                s = 0.0
+                for x in range(-rad, rad + 1):
+                    s += src[base + max(0, min(N - 1, x)) * 3 + ch]
+                for x in range(N):
+                    dst[base + x * 3 + ch] = s / w
+                    s += (src[base + min(N - 1, x + rad + 1) * 3 + ch]
+                          - src[base + max(0, x - rad) * 3 + ch])
+        # 縦方向
+        src2 = dst
+        dst2 = [0.0] * len(src2)
+        for x in range(N):
+            for ch in range(3):
+                col = x * 3 + ch
+                s = 0.0
+                for y in range(-rad, rad + 1):
+                    s += src2[max(0, min(N - 1, y)) * N * 3 + col]
+                for y in range(N):
+                    dst2[y * N * 3 + col] = s / w
+                    s += (src2[min(N - 1, y + rad + 1) * N * 3 + col]
+                          - src2[max(0, y - rad) * N * 3 + col])
+        src = dst2
+    return src
 
 
 def _nd(lx, ly, cx, cy, rx, ry, th):
@@ -205,6 +289,9 @@ def render(size):
             buf[idx + 2] = WATER_BASE[2] * shade
     for color, pts in build_marble():
         fill_poly(buf, N, pts, color)
+
+    # --- 墨流しをぼかしてインクのにじみ（柔らかい縁）にする ---
+    buf = box_blur(buf, N, max(1, round(N * 0.008)), passes=2)
 
     # --- 前景: 金魚（焦点）を合成 ---
     fx0 = int(max(0, (FISH_C[0] - FISH_REACH) * N))
