@@ -1078,8 +1078,9 @@ function buildPalette() {
       plip();
       if (def.a) sayColor(def.name);
       paletteEl.classList.remove("open");  // 選んだら自動で閉じてキャンバスに戻す
-      // 選んだ色がすぐ見える: 画面中央やや上に小さな墨滴を落とす
-      inkDrop(innerWidth / 2, innerHeight * 0.4, false, def.a ? { def } : null);
+      // 選んだ色がすぐ見える: 画面中央やや上に小さな墨滴を落とす（アイコン撮影では出さない）
+      if (!(typeof iconMode !== "undefined" && iconMode))
+        inkDrop(innerWidth / 2, innerHeight * 0.4, false, def.a ? { def } : null);
     });
     paletteEl.appendChild(b);
   });
@@ -1324,7 +1325,7 @@ const fx = (() => {
       if (typeof iconMode !== "undefined" && iconMode) {
         // アイコン撮影: 緋鯉を中央にやや右上向きで固定（泳がせない）
         f.x = innerWidth * 0.5; f.y = innerHeight * 0.52; f.angle = -0.18; f.jump = 0;
-        drawFish(f, now);
+        if (!location.search.includes("nofish")) drawFish(f, now);
       } else {
         stepFish(f, dt, now); drawFish(f, now);
       }
@@ -1495,7 +1496,7 @@ const visMode = location.search.includes("vis");
 // ?icon: アプリアイコン撮影用。実エンジンで綺麗に構図した墨流し+中央に緋鯉を拡大表示し、
 // UIを隠してシミュを凍結する（実レンダリングをそのままアイコンに使う＝詐欺にしない）
 const iconMode = location.search.includes("icon");
-const ICON_FISH_SCALE = 5.2;   // アイコンでの緋鯉の拡大率
+const ICON_FISH_SCALE = 3.6;   // アイコンでの緋鯉の拡大率（小さめ＝赤い光彩を抑え小さな魚に）
 if (iconMode) {
   config.IDLE_MS = 1e9;        // 自動ゴーストを止める
   ["palBtn", "washBtn", "panel", "sunset", "palette"].forEach((id) => {
@@ -1671,35 +1672,38 @@ function seedIcon() {
   const W = innerWidth, H = innerHeight;
   // 3色だけで綺麗に魅せる（暖色の緋鯉を引き立てる寒色系: 藍・紫・緑）。
   // inks: 0=あか 1=あお 2=きいろ 3=みどり 4=だいだい 5=むらさき
-  const pal = [inks[2], inks[1], inks[3]];  // きいろ / あお / みどり（黄・青・緑）
-  // 二次ベジェの曲線ストローク（中央を避けて周囲を流す・本数を絞り余白を残す）
-  const strokes = [
-    { c: 0, p: [0.16, 0.34, 0.42, 0.18, 0.82, 0.30] },  // 上を横切る（藍）
-    { c: 1, p: [0.84, 0.44, 0.72, 0.66, 0.46, 0.82] },  // 右下へ流す（紫）
-    { c: 2, p: [0.18, 0.74, 0.32, 0.52, 0.20, 0.32] },  // 左で渦（緑）
-    { c: 0, p: [0.32, 0.86, 0.58, 0.80, 0.78, 0.72] },  // 下を横切る（藍）
+  // 黄・青・緑の3色だけ。きいろ(黄)は濃いと橙〜赤に寄るので k を小さく＝薄めに保つ。
+  // ストロークは各色1本ずつ（計3本）で赤化と過密を防ぎ、3色を均等に見せる。
+  const YEL = inks[2], BLU = inks[1], GRN = inks[3];
+  // ⚠️ きいろは高密度で赤くレンダリングされる（R吸収0.03→Rだけ残り赤化）。
+  // → 黄は最も薄く＆最上部に限定し、中央へ集まらないよう流速も抑える。
+  const pal = [
+    { a: YEL.a, k: 0.11 },   // 0=きいろ（黄）最も薄く（赤化防止）
+    { a: BLU.a, k: 0.28 },   // 1=あお（青）
+    { a: GRN.a, k: 0.26 },   // 2=みどり（緑）
   ];
+  const strokes = [
+    { c: 0, p: [0.20, 0.22, 0.50, 0.13, 0.80, 0.21] },  // 最上部（黄・薄く）
+    { c: 1, p: [0.84, 0.34, 0.80, 0.60, 0.52, 0.82] },  // 右→下（青）
+    { c: 2, p: [0.18, 0.82, 0.30, 0.54, 0.18, 0.28] },  // 左で渦（緑）
+  ];
+  if (location.search.includes("noseed")) return;  // 切り分け用: シードしない
   for (const s of strokes) {
-    const a = pal[s.c].a;
+    const { a, k } = pal[s.c];
     const [x0, y0, x1, y1, x2, y2] = s.p;
     let prevx = x0, prevy = y0;
-    const n = 70;
+    const n = 72;
     for (let i = 1; i <= n; i++) {
       const t = i / n, mt = 1 - t;
       const x = mt * mt * x0 + 2 * mt * t * x1 + t * t * x2;
       const y = mt * mt * y0 + 2 * mt * t * y1 + t * t * y2;
       const vx = x - prevx, vy = y - prevy; prevx = x; prevy = y;
-      splat(x, y, vx * config.SPLAT_FORCE * 0.5, vy * config.SPLAT_FORCE * 0.5,
-            [a[0] * 0.28, a[1] * 0.28, a[2] * 0.28], 0.55);
+      // 流速を抑える（×0.25）＝インクを中央に集めず描いた場所に留める
+      splat(x, y, vx * config.SPLAT_FORCE * 0.25, vy * config.SPLAT_FORCE * 0.25,
+            [a[0] * k, a[1] * k, a[2] * k], 0.55);
       step(1 / 60);
     }
-    for (let i = 0; i < 22; i++) step(1 / 60);  // にじませる
-  }
-  // 色のアクセントのタップ（同じ3色から・2発だけ）
-  const taps = [[0.74, 0.28, 1], [0.26, 0.66, 2]];  // c は pal のインデックス
-  for (const [tx, ty, ci] of taps) {
-    inkDrop(W * tx, H * ty, true, { def: pal[ci] });
-    for (let i = 0; i < 28; i++) step(1 / 60);
+    for (let i = 0; i < 14; i++) step(1 / 60);  // 軽くにじませる（流しすぎない）
   }
 }
 if (iconMode) { seedIcon(); console.log("SUMI: icon-seeded"); }
@@ -1778,8 +1782,10 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
-/* ---------------- 起動時のウェルカム墨滴 ---------------- */
-setTimeout(() => { inkDrop(innerWidth / 2, innerHeight * 0.45, true); }, 500);
+/* ---------------- 起動時のウェルカム墨滴（検証/撮影モードでは出さない） ---------------- */
+if (!iconMode && !visMode && !demoMode && !stillMode) {
+  setTimeout(() => { inkDrop(innerWidth / 2, innerHeight * 0.45, true); }, 500);
+}
 </script>
 </body>
 </html>
