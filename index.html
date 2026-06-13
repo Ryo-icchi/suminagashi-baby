@@ -1136,6 +1136,7 @@ const fx = (() => {
     // ?demo（headless検証）ではリングを出さない: 同期シードの数十発が一斉に写り込み
     // 墨の視覚検証（細さ・色）を覆い隠すため。実機プレイには影響しない
     if (typeof demoMode !== "undefined" && demoMode) return;
+    if (typeof iconMode !== "undefined" && iconMode) return;  // アイコン撮影では波紋を出さない
     rings.push({ x: px, y: py, max: 80 * (scale || 1), color, t: 0 });
   }
 
@@ -1210,11 +1211,12 @@ const fx = (() => {
       jy = -Math.sin(f.jump * Math.PI) * 90;
       scale = 1 + Math.sin(f.jump * Math.PI) * 0.35;
     }
+    if (typeof iconMode !== "undefined" && iconMode) scale *= ICON_FISH_SCALE;
     ctx2.save();
     ctx2.translate(f.x * DPR, (f.y + jy) * DPR);
     ctx2.rotate(f.angle);
     ctx2.scale(scale * DPR, scale * DPR);
-    ctx2.globalAlpha = 0.82;
+    ctx2.globalAlpha = iconMode ? 0.95 : 0.82;
     const wag = Math.sin(now * 0.012 + f.phase) * 0.45;
     ctx2.fillStyle = f.hue;
     ctx2.beginPath();  // ひらひらの尾
@@ -1318,7 +1320,15 @@ const fx = (() => {
       if (petals[i].life <= 0) { petals.splice(i, 1); continue; }
       drawPetal(petals[i]);
     }
-    for (const f of fishes) { stepFish(f, dt, now); drawFish(f, now); }
+    for (const f of fishes) {
+      if (typeof iconMode !== "undefined" && iconMode) {
+        // アイコン撮影: 緋鯉を中央にやや右上向きで固定（泳がせない）
+        f.x = innerWidth * 0.5; f.y = innerHeight * 0.52; f.angle = -0.18; f.jump = 0;
+        drawFish(f, now);
+      } else {
+        stepFish(f, dt, now); drawFish(f, now);
+      }
+    }
   }
 
   return { resize, ring, fishTarget, fishJump, sakura, update };
@@ -1482,6 +1492,16 @@ const stillMode = location.search.includes("still");
 if (stillMode) { config.IDLE_MS = 1e9; }
 // ?vis: 見た目検証用の最小シード（実パラメータのなぞり1本+タップ2発だけ。?still と併用する）
 const visMode = location.search.includes("vis");
+// ?icon: アプリアイコン撮影用。実エンジンで綺麗に構図した墨流し+中央に緋鯉を拡大表示し、
+// UIを隠してシミュを凍結する（実レンダリングをそのままアイコンに使う＝詐欺にしない）
+const iconMode = location.search.includes("icon");
+const ICON_FISH_SCALE = 5.2;   // アイコンでの緋鯉の拡大率
+if (iconMode) {
+  config.IDLE_MS = 1e9;        // 自動ゴーストを止める
+  ["palBtn", "washBtn", "panel", "sunset", "palette"].forEach((id) => {
+    const e = document.getElementById(id); if (e) e.style.display = "none";
+  });
+}
 
 // デバッグプローブ: GPU テクスチャ/キャンバスの中心画素を直接読んで段階別に確認
 function probeTex(label, fbo, u, v) {
@@ -1644,7 +1664,44 @@ function seedVis() {
     for (let i = 0; i < 20; i++) step(1 / 60);
   }
 }
-if (visMode) { seedVis(); console.log("SUMI: vis-seeded"); }
+function seedIcon() {
+  // 実 splat / inkDrop（=本物の墨流しエンジン）で、正方形アイコン向けに綺麗に構図する。
+  // 中央は緋鯉を置くため少し空け、鮮やかな数色の流れる筋で囲む。
+  const inks = modeInks();
+  const W = innerWidth, H = innerHeight;
+  // 二次ベジェの曲線ストローク（鮮やかな色・中央を避けて周囲を流す）
+  const strokes = [
+    { ink: 0, p: [0.16, 0.32, 0.40, 0.16, 0.84, 0.30] },  // 上を横切る
+    { ink: 1, p: [0.84, 0.42, 0.74, 0.64, 0.50, 0.82] },  // 右下へ流す
+    { ink: 4, p: [0.18, 0.72, 0.30, 0.50, 0.18, 0.30] },  // 左で渦
+    { ink: 3, p: [0.30, 0.86, 0.56, 0.88, 0.80, 0.74] },  // 下を横切る
+    { ink: 2, p: [0.78, 0.20, 0.66, 0.34, 0.58, 0.24] },  // 右上の差し色
+  ];
+  for (const s of strokes) {
+    const a = inks[s.ink % inks.length].a;
+    const [x0, y0, x1, y1, x2, y2] = s.p;
+    let prevx = x0, prevy = y0;
+    const n = 70;
+    for (let i = 1; i <= n; i++) {
+      const t = i / n, mt = 1 - t;
+      const x = mt * mt * x0 + 2 * mt * t * x1 + t * t * x2;
+      const y = mt * mt * y0 + 2 * mt * t * y1 + t * t * y2;
+      const vx = x - prevx, vy = y - prevy; prevx = x; prevy = y;
+      splat(x, y, vx * config.SPLAT_FORCE * 0.5, vy * config.SPLAT_FORCE * 0.5,
+            [a[0] * 0.28, a[1] * 0.28, a[2] * 0.28], 0.55);
+      step(1 / 60);
+    }
+    for (let i = 0; i < 22; i++) step(1 / 60);  // にじませる
+  }
+  // 色のアクセントのタップ
+  const taps = [[0.30, 0.30, 3], [0.72, 0.30, 5], [0.70, 0.70, 1], [0.28, 0.70, 2]];
+  for (const [tx, ty, ci] of taps) {
+    inkDrop(W * tx, H * ty, true, { def: inks[ci % inks.length] });
+    for (let i = 0; i < 28; i++) step(1 / 60);
+  }
+}
+if (iconMode) { seedIcon(); console.log("SUMI: icon-seeded"); }
+else if (visMode) { seedVis(); console.log("SUMI: vis-seeded"); }
 else if (demoMode) { seedDemo(); console.log("SUMI: seeded"); }
 
 let ghost = null; // 仮想の筆 {x, y, angle, speed, turn, ttl, ink}
@@ -1694,7 +1751,7 @@ function frame(now) {
   } else {
     densityDissipation = config.DENSITY_DISSIPATION;
   }
-  if (!stillMode) {                      // still = 視覚検証用の凍結
+  if (!stillMode && !iconMode) {         // still / icon = 視覚検証・撮影用の凍結
     applyTilt();
     if (!bedtime) updateGhost(dt);
     step(dt);
