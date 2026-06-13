@@ -1,64 +1,51 @@
 #!/usr/bin/env python3
 """すみながしアプリのアイコンPNGを生成する（標準ライブラリのみ・Pillow不要）。
 
-「一目で金魚と分かる」ことを最優先に、輪郭のはっきりした金魚を描く:
-和紙＋ごく薄い色の水（はなやかモードの雰囲気）の上に、大きな赤い金魚
-（卵型の胴 + 大きく広がる扇の尾びれ + 背びれ + 目 + 縁取り）をくっきり描画。
-背景の水は柔らかいにじみ（吸収モデル）、金魚はスーパーサンプリングでアンチ
-エイリアスした明確なシルエット。icon-180 / icon-192 / icon-512 を出力する。
+アプリ本編に泳ぐ金魚と同じ「やわらかい水彩・墨にじみ調」のコーラル色の金魚を、
+和紙＋淡い青い水のにじみの上に描く。輪郭はカートゥーン風の硬い線ではなく、
+水彩のように少しにじむが、しずく型の胴＋流れる二股の尾びれという上品で明確な
+シルエットで「金魚」と分かるようにする。icon-180 / icon-192 / icon-512 を出力。
 """
 import math
 import struct
 import zlib
 
-PAPER = (0.945, 0.922, 0.871)
-ABSORB_K = 2.6
-MUD_CUT = 0.75
-DISP_MAX = 0.55
+PAPER = (0.952, 0.930, 0.882)        # 和紙の生成り
+WATER = (0.66, 0.75, 0.84)           # 淡い青い水のにじみ
+WATER_C = (0.50, 0.46)               # 水のにじみの中心（やや上）
+WATER_R = 0.42                       # 水のにじみの広がり
+WATER_STRENGTH = 0.42
 
-# 背景の水（はなやかモードの INKS と同一の吸収ベクトル・黒なし）
-AO = (1.05, 0.50, 0.06)        # あお
-KIIRO = (0.03, 0.14, 1.10)     # きいろ
-MIDORI = (0.95, 0.10, 0.90)    # みどり
-MURASAKI = (0.60, 1.00, 0.22)  # むらさき
+# 金魚の色（水彩コーラル・黒も硬い縁取りも使わない）
+BODY_COL = (0.93, 0.47, 0.30)        # 胴体（コーラル橙）
+FIN_COL = (0.95, 0.57, 0.44)         # 尾びれ・ひれ（明るいサーモンで透け感）
+RIM_COL = (0.82, 0.31, 0.19)         # 縁ににじみが溜まる深い橙（水彩の縁プール）
+EYE_COL = (0.42, 0.17, 0.13)         # 目（ごく小さな暗色の点）
 
-# 四隅にごく薄い色の水（金魚を主役にするため控えめ）
-DROPS = [
-    (0.15, 0.16, 0.150, 0.30, AO, 0.7),
-    (0.86, 0.18, 0.145, 0.28, KIIRO, 2.9),
-    (0.14, 0.85, 0.140, 0.28, MIDORI, 1.8),
-    (0.87, 0.84, 0.135, 0.26, MURASAKI, 5.1),
+# 金魚の配置（横向き・頭は右／尾は左。ほぼ水平にして「耳」化を断つ）
+FISH_C = (0.50, 0.50)
+FISH_ANGLE = -0.05                   # rad（ほぼ水平・頭がほんの少し上）
+FISH_SCALE = 0.80
+FEATHER = 0.072                      # 縁のにじみ幅（小=くっきり / 大=やわらか）
+
+# ローカル座標（頭=+x 右向き・原点=胴中心）でのパーツ:
+# (cx, cy, rx, ry, theta, category) category: 'body' or 'fin'
+# 尾は1つの繋がった扇（fan）を後方へ長く流し、先端2点で二股を示唆。ひれは細く後方へ流す
+# （丸い突起が手足に見えないように）
+BODY_PARTS = [
+    (0.04, 0.00, 0.300, 0.150, 0.0, 'body'),  # 胴体（横長しずく型・後方へ細る）
+    (0.20, 0.00, 0.115, 0.125, 0.0, 'body'),  # 頭側をやや丸く
 ]
-
-# 金魚（直接RGBで合成・くっきり）。赤金魚。
-FISH_BODY = (0.93, 0.30, 0.15)   # 胴体（朱赤）
-FISH_FIN = (0.97, 0.52, 0.22)    # ひれ・尾びれ（明るい橙でひらひら感）
-FISH_LINE = (0.58, 0.13, 0.06)   # 縁取り（深い赤・黒は使わない）
-EYE_WHITE = (0.99, 0.98, 0.95)
-EYE_PUPIL = (0.16, 0.10, 0.09)   # 瞳（ごく小さい暗色・目の表現に限定）
-
-FISH_TILT = -0.08          # やや頭上がり
-FISH_CX, FISH_CY = 0.50, 0.50
-OUTLINE = 1.075            # 縁取りのためのシルエット膨張率
-
-# 胴体: (cx, cy, rx, ry, theta)
-BODY = (0.545, 0.500, 0.200, 0.150, 0.0)
-# ひれ・尾びれ（胴体の後ろ＝左に大きな扇）
-FINS = [
-    (0.235, 0.350, 0.165, 0.082, -0.46),  # 尾びれ上ろう
-    (0.180, 0.500, 0.190, 0.086,  0.00),  # 尾びれ中ろう（大きく後ろへ）
-    (0.235, 0.650, 0.165, 0.082,  0.46),  # 尾びれ下ろう
-    (0.560, 0.330, 0.078, 0.090, -0.05),  # 背びれ（上へ）
-    (0.520, 0.658, 0.078, 0.050,  0.28),  # 腹びれ（下へ）
+FIN_PARTS = [
+    (-0.30,  0.000, 0.090, 0.050, 0.00, 'fin'),  # 尾の付け根（胴と扇を繋ぐ・細い）
+    (-0.50, -0.115, 0.235, 0.058, 0.42, 'fin'),  # 尾びれ上ろう（付け根から上へ開く扇）
+    (-0.50,  0.115, 0.235, 0.058, -0.42, 'fin'), # 尾びれ下ろう（付け根から下へ開く扇）
+    (-0.05, -0.150, 0.120, 0.038, -0.20, 'fin'), # 背びれ（細く後方へ流す）
+    (-0.02,  0.150, 0.092, 0.032,  0.22, 'fin'), # 腹びれ（細く後方へ）
+    (0.12,   0.108, 0.082, 0.026,  0.78, 'fin'), # 胸びれ（細く後ろ下へ流す）
 ]
-EYE = (0.660, 0.452, 0.044)    # 白目
-PUPIL = (0.668, 0.452, 0.022)  # 瞳
-# 口: 頭の先のごく小さなくぼみ（縁取り色の点）
-MOUTH = (0.742, 0.520, 0.018)
-
-# 金魚を含むおおよその範囲（ここだけスーパーサンプリングする）
-FISH_BBOX = (0.00, 0.84, 0.20, 0.80)
-SS = 3  # スーパーサンプリング（3x3）
+EYE_LOCAL = (0.195, -0.026, 0.023)   # 目（ローカル座標・半径）
+SS = 3
 
 
 def hash01(ix, iy):
@@ -77,97 +64,88 @@ def vnoise(x, y):
     return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
 
 
+def smoothstep(e0, e1, x):
+    if e0 == e1:
+        return 0.0 if x < e0 else 1.0
+    t = (x - e0) / (e1 - e0)
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
 def bg_color(u, v, px, py):
-    """背景（和紙 + ごく薄い色の水）の色 0..1。柔らかいので1サンプルで十分。"""
-    fiber = (vnoise(u * 6, v * 6) * 0.45 + vnoise(u * 25, v * 25) * 0.35
-             + vnoise(u * 110, v * 110) * 0.20)
+    """和紙 + 淡い青い水のにじみ。"""
+    fiber = (vnoise(u * 6, v * 6) * 0.45 + vnoise(u * 24, v * 24) * 0.35
+             + vnoise(u * 105, v * 105) * 0.20)
     speck = hash01(px // 2, py // 2)
-    shade = 0.965 + 0.055 * fiber + 0.012 * speck
-    dens = [0.0, 0.0, 0.0]
-    for (cx, cy, r, amp, absorb, phase) in DROPS:
-        dx, dy = u - cx, v - cy
-        d2 = dx * dx + dy * dy
-        if d2 > (r * 2.4) ** 2:
-            continue
-        dn = math.sqrt(d2) / r
-        g = amp * (math.exp(-dn ** 2.4) + 0.28 * math.exp(-((dn / 1.35) ** 2.0)))
-        for i in range(3):
-            dens[i] += absorb[i] * g
-    mud = min(dens)
-    dens = [min(max(0.0, d - MUD_CUT * mud), DISP_MAX) for d in dens]
-    return [PAPER[i] * shade * math.exp(-ABSORB_K * dens[i]) for i in range(3)]
+    shade = 0.965 + 0.05 * fiber + 0.012 * speck
+    col = [PAPER[i] * shade for i in range(3)]
+    d = math.hypot(u - WATER_C[0], v - WATER_C[1])
+    # にじみのムラ（水彩らしく不均一に）
+    wob = 0.85 + 0.30 * vnoise(u * 4 + 3.1, v * 4 + 7.7)
+    w = WATER_STRENGTH * math.exp(-((d / WATER_R) ** 2.2)) * wob
+    w = max(0.0, min(WATER_STRENGTH, w))
+    return [col[i] * (1 - w) + WATER[i] * w for i in range(3)]
 
 
-def _ell(u, v, cx, cy, rx, ry, th):
-    """楕円の正規化距離の2乗（<=1 で内側）。"""
-    dx, dy = u - cx, v - cy
+def _nd(lx, ly, cx, cy, rx, ry, th):
+    """ローカル点(lx,ly)の楕円正規化距離（1で縁）。"""
+    dx, dy = lx - cx, ly - cy
     c, s = math.cos(th), math.sin(th)
+    ex = dx * c + dy * s
+    ey = -dx * s + dy * c
+    return math.sqrt((ex / rx) ** 2 + (ey / ry) ** 2)
+
+
+def fish_pixel(u, v, base):
+    """背景色 base の上に金魚を水彩調で合成して返す。"""
+    # グローバル→ローカル（頭=+x）
+    c, s = math.cos(FISH_ANGLE), math.sin(FISH_ANGLE)
+    dx, dy = (u - FISH_C[0]) / FISH_SCALE, (v - FISH_C[1]) / FISH_SCALE
     lx = dx * c + dy * s
     ly = -dx * s + dy * c
-    return (lx / rx) ** 2 + (ly / ry) ** 2
 
+    nd_body = min((_nd(lx, ly, *p[:5]) for p in BODY_PARTS), default=9.9)
+    nd_fin = min((_nd(lx, ly, *p[:5]) for p in FIN_PARTS), default=9.9)
+    nd_min = min(nd_body, nd_fin)
+    cov = smoothstep(1.0 + FEATHER, 1.0 - FEATHER, nd_min)
+    if cov <= 0.0:
+        return base
 
-def fish_layer(u, v):
-    """点(u,v)の金魚レイヤーを返す。None=金魚外 / 'line'|'fin'|'body'|'eye'|'pupil'。"""
-    # 金魚中心まわりで逆回転（全体の傾き）
-    ct, st = math.cos(-FISH_TILT), math.sin(-FISH_TILT)
-    ru = FISH_CX + (u - FISH_CX) * ct - (v - FISH_CY) * st
-    rv = FISH_CY + (u - FISH_CX) * st + (v - FISH_CY) * ct
+    base_col = BODY_COL if nd_body <= nd_fin else FIN_COL
+    # 縁に深い色が溜まる水彩プール（中心=本来色 / 縁=深い橙）
+    core = smoothstep(1.0, 0.45, nd_min)
+    col = [RIM_COL[i] + (base_col[i] - RIM_COL[i]) * core for i in range(3)]
+    # 内部の淡いムラ（紙に染みた感じ）
+    mott = 0.96 + 0.07 * vnoise(lx * 9 + 11.0, ly * 9 + 5.0)
+    col = [col[i] * mott for i in range(3)]
+    # 目（小さな暗点・胴の上）
+    ed = math.hypot(lx - EYE_LOCAL[0], ly - EYE_LOCAL[1])
+    if ed < EYE_LOCAL[2] * 1.6:
+        ecov = smoothstep(EYE_LOCAL[2] * 1.3, EYE_LOCAL[2] * 0.6, ed)
+        col = [col[i] + (EYE_COL[i] - col[i]) * ecov for i in range(3)]
 
-    # 目（胴体より前面）
-    if (ru - PUPIL[0]) ** 2 + (rv - PUPIL[1]) ** 2 <= PUPIL[2] ** 2:
-        return 'pupil'
-    if (ru - EYE[0]) ** 2 + (rv - EYE[1]) ** 2 <= EYE[2] ** 2:
-        return 'eye'
-    # 口（縁取り色の小点）
-    if (ru - MOUTH[0]) ** 2 + (rv - MOUTH[1]) ** 2 <= MOUTH[2] ** 2:
-        return 'line'
-
-    in_body = _ell(ru, rv, *BODY) <= 1.0
-    if in_body:
-        return 'body'
-    for f in FINS:
-        if _ell(ru, rv, *f) <= 1.0:
-            return 'fin'
-    # 縁取り（シルエットを膨張させた外周リング）
-    o2 = OUTLINE ** 2
-    if _ell(ru, rv, *BODY) <= o2:
-        return 'line'
-    for f in FINS:
-        if _ell(ru, rv, *f) <= o2:
-            return 'line'
-    return None
-
-
-LAYER_COLOR = {
-    'line': FISH_LINE, 'fin': FISH_FIN, 'body': FISH_BODY,
-    'eye': EYE_WHITE, 'pupil': EYE_PUPIL,
-}
+    return [base[i] * (1 - cov) + col[i] * cov for i in range(3)]
 
 
 def render(size):
     rows = []
     inv = 1.0 / size
-    bx0, bx1, by0, by1 = FISH_BBOX
     for py in range(size):
         row = bytearray()
-        row.append(0)  # PNG filter: None
-        v = (py + 0.5) * inv
+        row.append(0)
         for px in range(size):
             u = (px + 0.5) * inv
+            v = (py + 0.5) * inv
             base = bg_color(u, v, px, py)
-            if bx0 <= u <= bx1 and by0 <= v <= by1:
-                # 金魚周辺はスーパーサンプリングでアンチエイリアス
-                acc = [0.0, 0.0, 0.0]
-                for sy in range(SS):
-                    for sx in range(SS):
-                        su = (px + (sx + 0.5) / SS) * inv
-                        sv = (py + (sy + 0.5) / SS) * inv
-                        lay = fish_layer(su, sv)
-                        col = LAYER_COLOR[lay] if lay else base
-                        acc[0] += col[0]; acc[1] += col[1]; acc[2] += col[2]
-                n = SS * SS
-                base = [acc[0] / n, acc[1] / n, acc[2] / n]
+            acc = [0.0, 0.0, 0.0]
+            for sy in range(SS):
+                for sx in range(SS):
+                    su = (px + (sx + 0.5) / SS) * inv
+                    sv = (py + (sy + 0.5) / SS) * inv
+                    col = fish_pixel(su, sv, base)
+                    acc[0] += col[0]; acc[1] += col[1]; acc[2] += col[2]
+            n = SS * SS
+            base = [acc[0] / n, acc[1] / n, acc[2] / n]
             row += bytes(max(0, min(255, round(base[i] * 255))) for i in range(3)) + b"\xff"
         rows.append(bytes(row))
     return b"".join(rows)
